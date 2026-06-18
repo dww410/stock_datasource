@@ -30,5 +30,9 @@
       "required": false,
       "description": "结束月份（YYYYMM格式）"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

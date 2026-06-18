@@ -263,11 +263,34 @@ async def trigger_sync(
         # Mode A: Redis required
         raise HTTPException(status_code=503, detail=str(e))
 
+    # Calculate date_range for display
+    from datetime import date
+
+    from stock_datasource.core.trade_calendar import trade_calendar_service
+
+    if request.trade_dates:
+        sorted_dates = sorted(request.trade_dates)
+        if len(sorted_dates) == 1:
+            date_range = sorted_dates[0]
+        else:
+            date_range = f"{sorted_dates[0]} ~ {sorted_dates[-1]}"
+    else:
+        # Get latest trading day for incremental sync
+        latest_days = trade_calendar_service.get_trading_days(n=1, market="cn")
+        if latest_days:
+            latest_date = latest_days[-1]
+            if isinstance(latest_date, date):
+                latest_date = latest_date.strftime("%Y-%m-%d")
+            date_range = latest_date
+        else:
+            date_range = None
+
     # Create execution record for single plugin sync with plugin name as group_name
     schedule_service.create_manual_execution(
         task_ids=[task.task_id],
         trigger_type="manual",
         group_name=request.plugin_name,  # Use plugin name for better display
+        date_range=date_range,
     )
 
     return task
@@ -500,6 +523,8 @@ async def enable_plugin(name: str, current_user: dict = Depends(require_admin)):
     success = plugin.set_enabled(True)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to enable plugin")
+    # Invalidate list cache so the next GET /plugins reflects the new state.
+    data_manage_service.invalidate_plugin_list_cache()
     return {"success": True, "is_enabled": True}
 
 
@@ -513,6 +538,7 @@ async def disable_plugin(name: str, current_user: dict = Depends(require_admin))
     success = plugin.set_enabled(False)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to disable plugin")
+    data_manage_service.invalidate_plugin_list_cache()
     return {"success": True, "is_enabled": False}
 
 

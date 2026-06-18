@@ -113,6 +113,7 @@ class BacktestRequest(BaseModel):
 
 class Trade(BaseModel):
     date: str
+    symbol: str = ""
     direction: str
     price: float
     quantity: int
@@ -367,6 +368,7 @@ async def run_backtest(request: BacktestRequest, current_user: dict = Depends(ge
     trades = [
         Trade(
             date=trade.timestamp.date().isoformat(),
+            symbol=trade.symbol,
             direction=trade.trade_type.value,
             price=float(trade.price),
             quantity=int(trade.quantity),

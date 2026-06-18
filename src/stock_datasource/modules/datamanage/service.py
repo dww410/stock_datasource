@@ -17,6 +17,7 @@ from .schemas import (
     MissingDataSummary,
     PluginColumn,
     PluginConfig,
+    PluginCoolingConfig,
     PluginDataPreview,
     PluginDetail,
     PluginInfo,
@@ -35,12 +36,35 @@ from .schemas import (
 class DataManageService:
     """Service for data management operations."""
 
+    MISSING_DATA_LOOKBACK_DAYS = 750  # ~3 years of A-share trading days (daily)
+    MISSING_DATA_LOOKBACK_PERIODS = {  # ~3 years per frequency
+        "weekly": 156,
+        "monthly": 36,
+    }
+    # Calendar tables are pre-generated (cover future dates). "Missing" for them
+    # = shortfall in future coverage vs. target. Target = ~6 months per the
+    # plugin's schedule_note ("建议每半年手动执行一次更新").
+    CALENDAR_TABLES = {"tushare_trade_calendar"}
+    CALENDAR_FUTURE_COVERAGE_DAYS = 180
+    # Freshness thresholds for dimension tables (days). Derived from
+    # schedule.frequency with a 2-day buffer for operational slack.
+    FRESHNESS_THRESHOLD_DAYS = {
+        "daily": 2,
+        "weekly": 9,
+        "monthly": 35,
+    }
+
     def __init__(self):
         self.logger = logger.bind(component="DataManageService")
         self._missing_data_cache: MissingDataSummary | None = None
         self._cache_time: datetime | None = None
         self._cache_days: int | None = None  # Track cached days range
         self._cache_ttl = 86400  # 24 hour cache (one day)
+        # Plugin list cache — short TTL so page reloads are fast but data stays
+        # fresh. Sync/refresh waits max this long to reflect in the list.
+        self._plugin_list_cache: list[PluginInfo] | None = None
+        self._plugin_list_cache_time: datetime | None = None
+        self._plugin_list_cache_ttl = 30  # 30 seconds
 
     def _get_plugin_data_source_config(
         self, plugin_name: str, config_data: dict[str, Any]
@@ -85,6 +109,54 @@ class DataManageService:
         """
         # Use global TradeCalendarService
         return trade_calendar_service.get_trading_days(n=days)
+
+    def get_trading_periods(self, n: int, frequency: str) -> list[str]:
+        """Get the last trading day of each period (week/month) for the last n periods.
+
+        Args:
+            n: Number of periods
+            frequency: 'weekly' or 'monthly'
+
+        Returns:
+            List of period-end trading dates in YYYY-MM-DD format, descending
+        """
+        return trade_calendar_service.get_trading_periods(n, frequency)
+
+    def _get_lookback_for_frequency(self, frequency: str) -> int:
+        """Return the lookback period count for a given schedule frequency."""
+        if frequency in self.MISSING_DATA_LOOKBACK_PERIODS:
+            return self.MISSING_DATA_LOOKBACK_PERIODS[frequency]
+        return self.MISSING_DATA_LOOKBACK_DAYS
+
+    def _get_calendar_missing_count(self, latest_date_str: str | None) -> int:
+        """Missing count for pre-generated calendar tables.
+
+        Calendar tables (e.g. tushare_trade_calendar) are pre-filled with future
+        dates. "Missing" = shortfall in future coverage vs. target (180 days).
+        Empty table → full target missing.
+
+        Args:
+            latest_date_str: max(date_column) as YYYY-MM-DD string, or None
+
+        Returns:
+            Missing day count (0 if coverage >= target)
+        """
+        if not latest_date_str:
+            return self.CALENDAR_FUTURE_COVERAGE_DAYS
+        try:
+            from datetime import date, datetime
+
+            today = date.today()
+            if hasattr(latest_date_str, "strftime"):
+                latest = latest_date_str.date() if isinstance(latest_date_str, datetime) else latest_date_str
+            else:
+                latest_str = str(latest_date_str).strip()[:10]
+                latest = datetime.strptime(latest_str, "%Y-%m-%d").date()
+            future_days = (latest - today).days
+            return max(0, self.CALENDAR_FUTURE_COVERAGE_DAYS - future_days)
+        except Exception as e:
+            self.logger.warning(f"Failed to compute calendar coverage: {e}")
+            return self.CALENDAR_FUTURE_COVERAGE_DAYS
 
     def check_data_exists(
         self, table_name: str, date_column: str | None, trade_date: str
@@ -257,6 +329,130 @@ class DataManageService:
         except Exception as e:
             self.logger.warning(f"Failed to get record count from {table_name}: {e}")
             return 0
+
+    def _batch_get_table_row_counts(self, table_names: list[str]) -> dict[str, int]:
+        """Batch query approximate row counts for multiple tables via system.parts.
+
+        Args:
+            table_names: List of table names
+
+        Returns:
+            {table_name: row_count} (0 for missing/empty tables)
+        """
+        results: dict[str, int] = {t: 0 for t in table_names}
+        if not table_names:
+            return results
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            placeholders = ", ".join(_to_clickhouse_literal(t) for t in table_names)
+            # LEFT JOIN system.tables → system.parts so that empty tables (no parts)
+            # still appear with cnt = 0 instead of being silently dropped.
+            query = f"""
+            SELECT t.name AS table, sum(p.rows) AS cnt
+            FROM system.tables t
+            LEFT JOIN system.parts p
+              ON p.table = t.name AND p.active = 1 AND p.database = t.database
+            WHERE t.name IN ({placeholders})
+            GROUP BY t.name
+            """
+            df = db_client.execute_query(query)
+            if df.empty:
+                return results
+            for _, row in df.iterrows():
+                tbl = row["table"]
+                cnt = row["cnt"]
+                if cnt is None:
+                    continue
+                results[tbl] = int(cnt)
+        except Exception as e:
+            self.logger.warning(f"Batch row count query failed: {e}")
+        return results
+
+    def _batch_get_latest_ingested_at(self, table_names: list[str]) -> dict[str, str | None]:
+        """Batch query max(_ingested_at) for dimension tables.
+
+        Used for freshness detection on tables without a trade-date column.
+        Combines all per-table max() queries into a single UNION ALL.
+
+        Args:
+            table_names: List of table names
+
+        Returns:
+            {table_name: iso_string or None} — None for missing/empty tables.
+        """
+        results: dict[str, str | None] = {t: None for t in table_names}
+        if not table_names:
+            return results
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            db_name = (
+                db_client.primary.database
+                if hasattr(db_client, "primary")
+                else db_client.database
+            )
+            db_name_literal = _to_clickhouse_literal(db_name)
+            placeholders = ", ".join(_to_clickhouse_literal(t) for t in table_names)
+            col_check = f"""
+            SELECT table FROM system.columns
+            WHERE database = {db_name_literal}
+              AND name = '_ingested_at'
+              AND table IN ({placeholders})
+            """
+            col_df = db_client.execute_query(col_check)
+            if col_df.empty:
+                return results
+            valid_tables = list(col_df["table"].tolist())
+
+            # Single UNION ALL — one round-trip for all dim tables.
+            union_parts = [
+                f"SELECT '{t}' AS tbl, toString(max(`_ingested_at`)) AS latest FROM {t}"
+                for t in valid_tables
+            ]
+            batch_query = " UNION ALL ".join(union_parts)
+            batch_df = db_client.execute_query(batch_query)
+            if batch_df.empty:
+                return results
+            for _, row in batch_df.iterrows():
+                tbl = row["tbl"]
+                val = row["latest"]
+                if val is None:
+                    continue
+                val_str = str(val).strip()
+                if val_str in ("", "NaT", "None", "1970-01-01 00:00:00"):
+                    continue
+                results[tbl] = val_str
+        except Exception as e:
+            self.logger.warning(f"Batch latest ingested_at query failed: {e}")
+        return results
+
+    def _is_dim_table_stale(
+        self, last_ingested_at: str | None, frequency: str
+    ) -> bool:
+        """Check if a dimension table's data exceeds the freshness threshold.
+
+        Args:
+            last_ingested_at: ISO datetime string from max(_ingested_at), or None
+            frequency: schedule.frequency (daily/weekly/monthly)
+
+        Returns:
+            True if no data or older than threshold; False if fresh.
+        """
+        if not last_ingested_at:
+            return True
+        try:
+            from datetime import datetime
+
+            # Normalize: truncate fractional seconds if present
+            ts_str = str(last_ingested_at).strip().replace("T", " ")[:19]
+            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            threshold_days = self.FRESHNESS_THRESHOLD_DAYS.get(frequency, 2)
+            age_days = (datetime.now() - ts).total_seconds() / 86400
+            return age_days > threshold_days
+        except Exception as e:
+            self.logger.warning(f"Failed to parse ingested_at {last_ingested_at}: {e}")
+            return True
 
     def _get_plugin_date_column(self, plugin_name: str) -> str | None:
         """Get the date column name for a plugin's table.
@@ -505,12 +701,268 @@ class DataManageService:
 
         return results
 
-    def get_plugin_list(self) -> list[PluginInfo]:
+    def _get_missing_dates_for_table(
+        self, table_name: str, date_column: str, trading_days: list[str]
+    ) -> list[str]:
+        """Get actual missing dates for a single table.
+
+        Args:
+            table_name: Name of the table
+            date_column: Name of the date column
+            trading_days: List of trading dates to check (YYYY-MM-DD format)
+
+        Returns:
+            List of missing dates in YYYY-MM-DD format
+        """
+        if not trading_days:
+            return []
+
+        db_name = (
+            db_client.primary.database
+            if hasattr(db_client, "primary")
+            else db_client.database
+        )
+
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            date_placeholders = ", ".join(_to_clickhouse_literal(d) for d in trading_days)
+
+            # Query for distinct dates that exist in the table within our range
+            query = f"""
+            SELECT DISTINCT toString({date_column}) as trade_date
+            FROM {table_name}
+            WHERE {date_column} IN ({date_placeholders})
+            """
+            df = db_client.execute_query(query)
+
+            if df.empty:
+                return trading_days  # All dates are missing
+
+            existing_dates = set(str(d).strip()[:10] for d in df["trade_date"] if d is not None)
+            missing_dates = [d for d in trading_days if d not in existing_dates]
+            return missing_dates
+
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to get missing dates for {table_name}: {e}"
+            )
+            # Table missing or query failed → treat all dates as missing
+            return trading_days
+
+    def _get_periodic_missing_count(
+        self, table_name: str, date_column: str, periods: list[str]
+    ) -> int:
+        """Count missing periods for weekly/monthly tables using count(DISTINCT).
+
+        Lighter than `_get_missing_dates_for_table` (which fetches all dates)
+        when only the count is needed — avoids transferring the full date list.
+
+        Args:
+            table_name: Name of the table
+            date_column: Name of the date column
+            periods: List of period-end trading dates (YYYY-MM-DD)
+
+        Returns:
+            Number of missing periods (0 if all present, len(periods) if all missing).
+        """
+        if not periods:
+            return 0
+        expected = len(periods)
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            date_values = ", ".join(_to_clickhouse_literal(d) for d in periods)
+            q = (
+                f"SELECT count(DISTINCT {date_column}) AS cnt "
+                f"FROM {table_name} "
+                f"WHERE {date_column} IN ({date_values})"
+            )
+            df = db_client.execute_query(q)
+            if df.empty:
+                return expected
+            return max(0, expected - int(df["cnt"].iloc[0]))
+        except Exception as e:
+            self.logger.warning(
+                f"Periodic missing count failed for {table_name}: {e}"
+            )
+            return expected
+
+    def _get_existing_table_cols(
+        self, table_date_map: dict[str, str]
+    ) -> set[tuple[str, str]]:
+        """One-shot check of which (table, column) pairs exist in ClickHouse.
+
+        Used to skip non-existent tables without triggering retry backoff in
+        per-table queries.
+
+        Args:
+            table_date_map: {table_name: date_column}
+
+        Returns:
+            Set of (table_name, column_name) tuples that exist.
+        """
+        if not table_date_map:
+            return set()
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            db_name = (
+                db_client.primary.database
+                if hasattr(db_client, "primary")
+                else db_client.database
+            )
+            db_name_literal = _to_clickhouse_literal(db_name)
+            placeholders = ", ".join(_to_clickhouse_literal(t) for t in table_date_map)
+            q = (
+                f"SELECT table, name FROM system.columns "
+                f"WHERE database = {db_name_literal} "
+                f"AND table IN ({placeholders})"
+            )
+            df = db_client.execute_query(q)
+            if df.empty:
+                return set()
+            return {(row["table"], row["name"]) for _, row in df.iterrows()}
+        except Exception as e:
+            self.logger.warning(f"Existing table cols check failed: {e}")
+            return set()
+
+    def _batch_get_missing_counts(
+        self,
+        table_date_map: dict[str, str],
+        trading_days: list[str],
+        existing_cols: set[tuple[str, str]] | None = None,
+    ) -> dict[str, int]:
+        """Batch query missing data counts for multiple tables efficiently.
+
+        Combines all per-table count queries into a single UNION ALL with a
+        shared date-list CTE. Falls back to per-table queries on failure so a
+        single bad table doesn't poison the rest.
+
+        Args:
+            table_date_map: {table_name: date_column} for tables that have date columns
+            trading_days: List of trading dates to check (YYYY-MM-DD format)
+
+        Returns:
+            {table_name: missing_count}
+        """
+        if not table_date_map or not trading_days:
+            return {t: 0 for t in table_date_map}
+
+        results: dict[str, int] = {t: 0 for t in table_date_map}
+        db_name = (
+            db_client.primary.database
+            if hasattr(db_client, "primary")
+            else db_client.database
+        )
+
+        # Use pre-computed existence set if provided, otherwise query it.
+        if existing_cols is None:
+            existing_cols = self._get_existing_table_cols(table_date_map)
+
+        try:
+            from stock_datasource.models.database import _to_clickhouse_literal
+
+            expected = len(trading_days)
+
+            # Separate valid from invalid (table, col) pairs up front so the
+            # UNION ALL only includes tables that actually exist.
+            valid_pairs = [
+                (t, c)
+                for t, c in table_date_map.items()
+                if (t, c) in existing_cols
+            ]
+            for t, c in table_date_map.items():
+                if (t, c) not in existing_cols:
+                    results[t] = expected
+
+            if not valid_pairs:
+                return results
+
+            # Single UNION ALL — one round-trip for all daily tables.
+            date_literals = ", ".join(_to_clickhouse_literal(d) for d in trading_days)
+            union_parts = [
+                f"SELECT '{t}' AS tbl, count(DISTINCT {c}) AS cnt "
+                f"FROM {t} "
+                f"WHERE {c} IN ({date_literals})"
+                for t, c in valid_pairs
+            ]
+            batch_query = " UNION ALL ".join(union_parts)
+            batch_df = db_client.execute_query(batch_query)
+
+            if not batch_df.empty:
+                for _, row in batch_df.iterrows():
+                    tbl = row["tbl"]
+                    cnt = row["cnt"]
+                    if cnt is None:
+                        continue
+                    results[tbl] = max(0, expected - int(cnt))
+
+        except Exception as e:
+            self.logger.warning(
+                f"Batch UNION missing count failed, falling back to per-table: {e}"
+            )
+            expected = len(trading_days)
+            date_values = ", ".join(
+                _to_clickhouse_literal(d) for d in trading_days
+            ) if trading_days else ""
+            for table_name, date_col in table_date_map.items():
+                if (table_name, date_col) not in existing_cols:
+                    results[table_name] = expected
+                    continue
+                try:
+                    q = (
+                        f"SELECT count(DISTINCT {date_col}) AS date_count "
+                        f"FROM {table_name} "
+                        f"WHERE {date_col} IN ({date_values})"
+                    )
+                    df = db_client.execute_query(q)
+                    if df.empty:
+                        continue
+                    date_count = int(df["date_count"].iloc[0])
+                    results[table_name] = max(0, expected - date_count)
+                except Exception as inner:
+                    self.logger.warning(
+                        f"Missing count query failed for {table_name}: {inner}"
+                    )
+
+        return results
+
+    def get_plugin_list(self, force_refresh: bool = False) -> list[PluginInfo]:
         """Get list of all plugins with status info.
+
+        Results are cached for 30s to keep page reloads fast.
+
+        Args:
+            force_refresh: Bypass cache and re-query.
 
         Returns:
             List of plugin info
         """
+        if not force_refresh and self._plugin_list_cache is not None:
+            age = (
+                datetime.now() - self._plugin_list_cache_time
+            ).total_seconds() if self._plugin_list_cache_time else float("inf")
+            if age < self._plugin_list_cache_ttl:
+                return self._plugin_list_cache
+
+        plugins = self._build_plugin_list()
+        self._plugin_list_cache = plugins
+        self._plugin_list_cache_time = datetime.now()
+        return plugins
+
+    def invalidate_plugin_list_cache(self) -> None:
+        """Drop the plugin list cache so the next read re-queries ClickHouse.
+
+        Call after any mutation that changes plugin state (enable/disable,
+        sync trigger, etc.) so the UI reflects the new state immediately
+        instead of waiting for the 30s TTL.
+        """
+        self._plugin_list_cache = None
+        self._plugin_list_cache_time = None
+
+    def _build_plugin_list(self) -> list[PluginInfo]:
+        """Build plugin list from scratch (no cache)."""
         plugins: list[PluginInfo] = []
 
         # Phase 1: Collect plugin metadata (no DB queries)
@@ -555,6 +1007,7 @@ class DataManageService:
                         "available_data_sources": available_data_sources,
                         "dependencies": dependencies,
                         "optional_dependencies": optional_dependencies,
+                        "description": config_data.get("description") or plugin.description,
                     }
                 )
 
@@ -566,16 +1019,77 @@ class DataManageService:
                 self.logger.error(f"Failed to get plugin info for {plugin_name}: {e}")
                 continue
 
-        # Phase 2: Batch query latest dates (1~2 DB queries instead of 63*3)
+        # Phase 2: Batch query latest dates and missing counts
         latest_dates = self._batch_get_latest_dates(table_date_map)
 
         # Pre-fetch trading days once (not per-plugin)
         trading_days = None
-        today_str = date.today().strftime("%Y-%m-%d")
         try:
-            trading_days = self.get_trading_days(30)
+            trading_days = self.get_trading_days(self.MISSING_DATA_LOOKBACK_DAYS)
         except Exception:
             pass
+
+        # One-shot existence check for all (table, date_col) pairs. Reused by
+        # both the daily batch and the weekly/monthly per-table queries so we
+        # don't trigger 2x retries on tables that don't exist (each retry has
+        # 1-3s backoff).
+        existing_table_cols = self._get_existing_table_cols(table_date_map)
+
+        # Batch query missing counts for daily plugins
+        daily_table_date_map = {
+            table_name: date_col
+            for table_name, date_col in table_date_map.items()
+            if any(m["table_name"] == table_name and m["frequency"] == "daily" for m in plugin_metas)
+        }
+        missing_counts = self._batch_get_missing_counts(
+            daily_table_date_map, trading_days or [], existing_table_cols
+        )
+
+        # Per-table missing count for weekly/monthly plugins.
+        # Few in number, but cache periods per frequency to avoid recomputing.
+        periodic_missing: dict[str, int] = {}
+        periods_cache: dict[str, list[str]] = {}
+        for meta in plugin_metas:
+            freq = meta["frequency"]
+            if meta["date_column"] and freq in self.MISSING_DATA_LOOKBACK_PERIODS:
+                # Skip non-existent tables up front — avoids retry backoff delay.
+                if (meta["table_name"], meta["date_column"]) not in existing_table_cols:
+                    try:
+                        periods = periods_cache.get(freq) or self.get_trading_periods(
+                            self.MISSING_DATA_LOOKBACK_PERIODS[freq], freq
+                        )
+                        periods_cache[freq] = periods
+                        periodic_missing[meta["table_name"]] = len(periods)
+                    except Exception:
+                        periodic_missing[meta["table_name"]] = (
+                            self.MISSING_DATA_LOOKBACK_PERIODS[freq]
+                        )
+                    continue
+                try:
+                    if freq not in periods_cache:
+                        periods_cache[freq] = self.get_trading_periods(
+                            self.MISSING_DATA_LOOKBACK_PERIODS[freq], freq
+                        )
+                    periods = periods_cache[freq]
+                    periodic_missing[meta["table_name"]] = (
+                        self._get_periodic_missing_count(
+                            meta["table_name"], meta["date_column"], periods
+                        )
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Periodic missing check failed for {meta['table_name']}: {e}"
+                    )
+
+        # Batch query row counts for dimension tables (no date column) so we can
+        # flag a completely empty table as "missing" instead of silently showing 0.
+        dim_table_names = [
+            m["table_name"] for m in plugin_metas if not m["date_column"]
+        ]
+        dim_row_counts = self._batch_get_table_row_counts(dim_table_names)
+
+        # Batch query latest _ingested_at for dimension tables (freshness signal)
+        dim_ingested_at = self._batch_get_latest_ingested_at(dim_table_names)
 
         # Phase 3: Assemble results
         for meta in plugin_metas:
@@ -586,24 +1100,46 @@ class DataManageService:
 
                 latest_date = latest_dates.get(table_name) if date_column else None
 
-                missing_count = 0
-                if (
-                    date_column
-                    and frequency == "daily"
-                    and latest_date
-                    and trading_days
-                ):
-                    if latest_date < today_str:
-                        for td in trading_days:
-                            if td > latest_date:
-                                missing_count += 1
-                            else:
-                                break
+                if meta["plugin_name"] in self.CALENDAR_TABLES:
+                    # Pre-generated calendar tables: missing = future coverage shortfall
+                    missing_count = self._get_calendar_missing_count(latest_date)
+                elif date_column and frequency == "daily" and trading_days:
+                    # Daily tables: missing = expected trading days - distinct dates
+                    # found in window. Empty table → 750 - 0 = 750 (all missing).
+                    missing_count = missing_counts.get(table_name, 0)
+                elif date_column and frequency in self.MISSING_DATA_LOOKBACK_PERIODS:
+                    # Weekly/monthly tables: missing = expected periods - periods
+                    # found in table.
+                    missing_count = periodic_missing.get(table_name, 0)
+                elif not date_column:
+                    # Dimension tables: no date concept. Empty → full window missing
+                    # (signal: needs data, scaled by frequency), has data → 0.
+                    missing_count = (
+                        self._get_lookback_for_frequency(frequency)
+                        if dim_row_counts.get(table_name, 0) == 0
+                        else 0
+                    )
+                else:
+                    # Other non-daily tables with date column: use latest_date as
+                    # emptiness signal. Empty → 750, has data → 0.
+                    missing_count = (
+                        self.MISSING_DATA_LOOKBACK_DAYS
+                        if latest_date is None
+                        else 0
+                    )
+
+                # Freshness detection: only for dimension tables (no date column)
+                if not date_column:
+                    last_ingested = dim_ingested_at.get(table_name)
+                    is_stale = self._is_dim_table_stale(last_ingested, frequency)
+                else:
+                    last_ingested = None
+                    is_stale = False
 
                 info = PluginInfo(
                     name=meta["plugin_name"],
                     version=meta["plugin"].version,
-                    description=meta["plugin"].description,
+                    description=meta.get("description") or meta["plugin"].description,
                     type="data_source",
                     category=meta["category"],
                     role=meta["role"],
@@ -618,6 +1154,8 @@ class DataManageService:
                     available_data_sources=meta["available_data_sources"],
                     dependencies=meta["dependencies"],
                     optional_dependencies=meta["optional_dependencies"],
+                    last_ingested_at=last_ingested,
+                    is_stale=is_stale,
                 )
                 plugins.append(info)
             except Exception as e:
@@ -654,6 +1192,15 @@ class DataManageService:
             day_of_week=schedule_data.get("day_of_week"),
         )
 
+        # Parse cooling config
+        cooling_data = config_data.get("cooling")
+        cooling = None
+        if cooling_data:
+            cooling = PluginCoolingConfig(
+                rate_limit_seconds=cooling_data.get("rate_limit_seconds", 360),
+                ip_limit_seconds=cooling_data.get("ip_limit_seconds", 600),
+            )
+
         config = PluginConfig(
             enabled=config_data.get("enabled", True),
             rate_limit=config_data.get("rate_limit", 120),
@@ -664,6 +1211,7 @@ class DataManageService:
             data_source=data_source,
             available_data_sources=available_data_sources,
             parameters_schema=config_data.get("parameters_schema", {}),
+            cooling=cooling,
         )
 
         # Get schema
@@ -699,23 +1247,60 @@ class DataManageService:
 
         # Get missing dates for daily plugins (skip dimension tables without date column)
         missing_dates = []
-        if date_column and schedule.frequency == ScheduleFrequency.DAILY:
-            trading_days = self.get_trading_days(30)
-            for trade_date in trading_days:
-                if not self.check_data_exists(table_name, date_column, trade_date):
-                    missing_dates.append(trade_date)
+        freq_str = schedule.frequency.value if hasattr(schedule.frequency, "value") else str(schedule.frequency)
+        if plugin_name in self.CALENDAR_TABLES:
+            # Pre-generated calendar tables: missing = future coverage shortfall
+            missing_count = self._get_calendar_missing_count(latest_date)
+        elif date_column and freq_str == "daily":
+            # Daily tables: missing = trading days in window not present in table.
+            # Empty table → all 750 trading days missing.
+            trading_days = self.get_trading_days(self.MISSING_DATA_LOOKBACK_DAYS)
+            missing_dates = self._get_missing_dates_for_table(table_name, date_column, trading_days)
+            missing_count = len(missing_dates)
+        elif date_column and freq_str in self.MISSING_DATA_LOOKBACK_PERIODS:
+            # Weekly/monthly tables: missing = period-end dates not present in table.
+            periods = self.get_trading_periods(
+                self.MISSING_DATA_LOOKBACK_PERIODS[freq_str], freq_str
+            )
+            missing_dates = self._get_missing_dates_for_table(table_name, date_column, periods)
+            missing_count = len(missing_dates)
+        elif not date_column:
+            # Dimension tables: empty → full window missing, has data → 0
+            missing_count = (
+                self._get_lookback_for_frequency(freq_str)
+                if total_records == 0
+                else 0
+            )
+        else:
+            # Other non-daily with date column: empty → full window, has data → 0
+            missing_count = (
+                self._get_lookback_for_frequency(freq_str)
+                if latest_date is None
+                else 0
+            )
+
+        # Freshness detection for dimension tables
+        if not date_column:
+            ingested_map = self._batch_get_latest_ingested_at([table_name])
+            last_ingested = ingested_map.get(table_name)
+            is_stale = self._is_dim_table_stale(last_ingested, freq_str)
+        else:
+            last_ingested = None
+            is_stale = False
 
         status = PluginStatus(
             latest_date=latest_date,
-            missing_count=len(missing_dates),
+            missing_count=missing_count,
             missing_dates=missing_dates[:10],  # Limit to 10 for response
             total_records=total_records,
+            last_ingested_at=last_ingested,
+            is_stale=is_stale,
         )
 
         return PluginDetail(
             plugin_name=plugin_name,
             version=plugin.version,
-            description=plugin.description,
+            description=config_data.get("description") or plugin.description,
             config=config,
             table_schema=schema,
             status=status,
@@ -841,19 +1426,67 @@ class DataManageService:
 
         # Get missing dates for daily plugins (skip dimension tables without date column)
         schedule = plugin.get_schedule()
+        freq_str = schedule.get("frequency", "daily")
         missing_dates = []
 
-        if date_column and schedule.get("frequency") == "daily":
-            trading_days = self.get_trading_days(30)
-            for trade_date in trading_days:
-                if not self.check_data_exists(table_name, date_column, trade_date):
-                    missing_dates.append(trade_date)
+        if plugin_name in self.CALENDAR_TABLES:
+            # Pre-generated calendar tables: missing = future coverage shortfall
+            missing_count = self._get_calendar_missing_count(latest_date)
+        elif date_column and freq_str == "daily":
+            trading_days = self.get_trading_days(self.MISSING_DATA_LOOKBACK_DAYS)
+            if latest_date is None:
+                # Empty table: all trading days in window are missing.
+                # Skip per-day query loop — would return the full list anyway.
+                missing_dates = trading_days
+            else:
+                # Single SQL query instead of 750 per-day check_data_exists calls.
+                missing_dates = self._get_missing_dates_for_table(
+                    table_name, date_column, trading_days
+                )
+            missing_count = len(missing_dates)
+        elif date_column and freq_str in self.MISSING_DATA_LOOKBACK_PERIODS:
+            # Weekly/monthly tables: missing = period-end dates not present.
+            periods = self.get_trading_periods(
+                self.MISSING_DATA_LOOKBACK_PERIODS[freq_str], freq_str
+            )
+            if latest_date is None:
+                missing_dates = periods
+            else:
+                missing_dates = self._get_missing_dates_for_table(
+                    table_name, date_column, periods
+                )
+            missing_count = len(missing_dates)
+        elif not date_column:
+            # Dimension tables: empty → full window missing, has data → 0
+            missing_count = (
+                self._get_lookback_for_frequency(freq_str)
+                if total_records == 0
+                else 0
+            )
+        else:
+            # Other non-daily with date column: empty → full window, has data → 0
+            missing_count = (
+                self._get_lookback_for_frequency(freq_str)
+                if latest_date is None
+                else 0
+            )
+
+        # Freshness detection for dimension tables
+        if not date_column:
+            ingested_map = self._batch_get_latest_ingested_at([table_name])
+            last_ingested = ingested_map.get(table_name)
+            is_stale = self._is_dim_table_stale(last_ingested, freq_str)
+        else:
+            last_ingested = None
+            is_stale = False
 
         return PluginStatus(
             latest_date=latest_date,
-            missing_count=len(missing_dates),
-            missing_dates=missing_dates,
+            missing_count=missing_count,
+            missing_dates=missing_dates[:10] if date_column else [],
             total_records=total_records,
+            last_ingested_at=last_ingested,
+            is_stale=is_stale,
         )
 
     def check_dates_data_exists(
@@ -1241,11 +1874,12 @@ class SyncTaskManager:
             )
             cutoff_literal = _to_clickhouse_literal(cutoff_time)
             query = f"""
-            SELECT 
+            SELECT
                 task_id, plugin_name, task_type, status, progress,
                 records_processed, total_records, error_message,
-                trade_dates, 
+                trade_dates,
                 formatDateTime(created_at, '%Y-%m-%d %H:%i:%S') as created_at_str,
+                formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') as updated_at_str,
                 formatDateTime(started_at, '%Y-%m-%d %H:%i:%S') as started_at_str,
                 formatDateTime(completed_at, '%Y-%m-%d %H:%i:%S') as completed_at_str,
                 user_id, username
@@ -1301,6 +1935,7 @@ class SyncTaskManager:
                     else None,
                     trade_dates=list(row["trade_dates"]) if row["trade_dates"] else [],
                     created_at=parse_dt(row["created_at_str"]),
+                    updated_at=parse_dt(row["updated_at_str"]),
                     started_at=parse_dt(row["started_at_str"]),
                     completed_at=parse_dt(row["completed_at_str"]),
                     user_id=row.get("user_id") if row.get("user_id") else None,
@@ -1443,8 +2078,31 @@ class SyncTaskManager:
             if task.task_type == TaskType.BACKFILL.value and task.trade_dates:
                 # Backfill specific dates with parallel processing
                 self._execute_backfill_parallel(task, plugin)
+            elif task.task_type == TaskType.FULL.value:
+                # ========== FULL SYNC: Full historical backfill ==========
+                # Uses config.json's default_start_date and default_end_date
+                result = plugin.run_backfill()
+
+                if result.get("status") == "success":
+                    backfill_result = result.get("steps", {}).get("backfill", {})
+                    task.records_processed = int(backfill_result.get("total_records", 0))
+                    task.progress = 100
+                else:
+                    error_msg = result.get("error", "全量同步失败")
+                    backfill_result = result.get("steps", {}).get("backfill", {})
+                    backfill_errors = backfill_result.get("errors", [])
+                    full_error = f"{error_msg}"
+                    if backfill_errors:
+                        errors_str = "\n".join(
+                            f"  - {e.get('date', 'unknown')}: {e.get('error', '')}"
+                            for e in backfill_errors[:5]
+                        )
+                        full_error += f"\n\n错误详情:\n{errors_str}"
+                        if len(backfill_errors) > 5:
+                            full_error += f"\n  ... 还有 {len(backfill_errors) - 5} 个错误"
+                    raise ValueError(full_error)
             else:
-                # Determine market from plugin category
+                # ========== INCREMENTAL SYNC: Latest trading day only ==========
                 from stock_datasource.core.base_plugin import PluginCategory
                 from stock_datasource.core.trade_calendar import MARKET_CN, MARKET_HK
                 from stock_datasource.services.task_worker import (
@@ -1457,12 +2115,10 @@ class SyncTaskManager:
                     else MARKET_CN
                 )
 
-                # Incremental or full sync - use latest valid trading day from calendar
                 target_date = self._get_latest_trading_date(market=market)
                 if not target_date:
                     raise ValueError("无法获取有效交易日，请检查交易日历数据")
 
-                # Detect plugin parameter style to call with correct params
                 param_style = _detect_plugin_param_style(plugin)
 
                 if param_style == "date_range" or param_style == "hk_daily":
@@ -1470,7 +2126,6 @@ class SyncTaskManager:
                 elif param_style == "month_range":
                     result = plugin.run(month=target_date[:6])
                 elif param_style in ("entity_code", "skip_scheduled"):
-                    # Cannot run automatically - needs entity code
                     raise ValueError(
                         f"插件 {task.plugin_name} 需要指定代码参数(如ts_code)，不支持批量同步"
                     )
@@ -1480,13 +2135,16 @@ class SyncTaskManager:
                     result = plugin.run(trade_date=target_date)
 
                 if result.get("status") == "success":
-                    # Convert to int to avoid numpy.uint64 serialization issues
+                    # Get actual records from extract step (more reliable)
+                    # Fallback to load.total_records if extract records not available
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     task.records_processed = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                     task.progress = 100
                 else:
-                    # Pipeline failed - get detailed error info
                     error_msg = result.get("error", "插件执行失败")
                     error_detail = result.get("error_detail", "")
                     full_error = f"{error_msg}"
@@ -1496,7 +2154,13 @@ class SyncTaskManager:
 
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
+            task.error_message = ""  # Clear any previous error message on success
             self._save_task_to_db(task)
+
+            # Update execution record
+            from .schedule_service import schedule_service
+
+            schedule_service.update_execution_on_task_complete(task_id, "completed")
             self.logger.info(f"Task {task_id} completed successfully")
 
         except Exception as e:
@@ -1513,6 +2177,11 @@ class SyncTaskManager:
             task.error_message = f"{error_msg}\n\n--- 堆栈跟踪 ---\n{error_tb}"
             task.completed_at = datetime.now()
             self._save_task_to_db(task)
+
+            # Update execution record
+            from .schedule_service import schedule_service
+
+            schedule_service.update_execution_on_task_complete(task_id, "failed")
             self.logger.error(f"Task {task_id} failed: {error_msg}\n{error_tb}")
 
     def _get_latest_trading_date(self, market: str = "cn") -> str | None:
@@ -1755,6 +2424,84 @@ class SyncTaskManager:
 
         return self._task_data_to_sync_task(task_data)
 
+    def get_task_from_history(self, task_id: str) -> SyncTask | None:
+        """Get task from ClickHouse history (fallback for Redis-missing tasks).
+
+        Used for retry functionality when tasks no longer exist in Redis
+        (e.g., after Redis restart or data cleanup).
+
+        Args:
+            task_id: Task ID to look up
+
+        Returns:
+            SyncTask if found in history, None otherwise
+        """
+        try:
+            from stock_datasource.models.database import db_client
+
+            query = """
+            SELECT
+                task_id, plugin_name, task_type, status,
+                trade_dates, created_at, started_at, completed_at,
+                progress, records_processed, error_message,
+                user_id, username
+            FROM sync_task_history FINAL
+            WHERE task_id = %(task_id)s
+            LIMIT 1
+            """
+            result = db_client.execute_query(query, {"task_id": task_id})
+
+            if result.empty:
+                return None
+
+            row = result.iloc[0]
+
+            # Parse trade_dates (might be string representation of array)
+            trade_dates = row.get("trade_dates", [])
+            if isinstance(trade_dates, str):
+                import json
+
+                try:
+                    trade_dates = json.loads(trade_dates)
+                except:
+                    trade_dates = []
+
+            # Parse datetime fields
+            def parse_dt(val):
+                if val and str(val) != "NaT":
+                    try:
+                        import pandas as pd
+
+                        if isinstance(val, pd.Timestamp):
+                            return val.to_pydatetime()
+                        from datetime import datetime
+
+                        return datetime.strptime(str(val)[:19], "%Y-%m-%d %H:%M:%S")
+                    except:
+                        return None
+                return None
+
+            task_data = {
+                "task_id": row["task_id"],
+                "plugin_name": row["plugin_name"],
+                "task_type": row["task_type"],
+                "status": row["status"],
+                "trade_dates": trade_dates,
+                "progress": float(row.get("progress", 0)),
+                "records_processed": int(row.get("records_processed", 0)),
+                "error_message": row.get("error_message"),
+                "created_at": parse_dt(row.get("created_at")),
+                "started_at": parse_dt(row.get("started_at")),
+                "completed_at": parse_dt(row.get("completed_at")),
+                "user_id": row.get("user_id"),
+                "username": row.get("username"),
+            }
+
+            return self._task_data_to_sync_task(task_data)
+        except Exception as e:
+            self.logger.error(f"Failed to get task {task_id} from history: {e}")
+            return None
+
     def get_all_tasks(self) -> list[SyncTask]:
         """Get all tasks."""
         return list(self._tasks.values())
@@ -1965,7 +2712,8 @@ class SyncTaskManager:
                 return None
 
             status = str(task_data.get("status", "pending"))
-            if status not in {"failed", "cancelled"}:
+            # Allow retry for failed/cancelled AND stale running/pending (service restart)
+            if status not in {"failed", "cancelled", "running", "pending"}:
                 self.logger.warning(
                     f"Task {task_id} is not retryable (status: {status})"
                 )

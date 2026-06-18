@@ -84,6 +84,16 @@ class TuShareSwDailyPlugin(BasePlugin):
             return {"status": "no_data", "loaded_records": 0}
 
         results = {"status": "success", "tables_loaded": [], "total_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_sw_daily", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
         try:
             schema = self.get_schema()
             table_name = schema.get("table_name")

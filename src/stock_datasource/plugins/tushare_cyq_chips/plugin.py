@@ -69,13 +69,73 @@ class TuShareCyqChipsPlugin(BasePlugin):
             end_date: End date in YYYYMMDD format
         """
         ts_code = kwargs.get("ts_code")
-        if not ts_code:
-            raise ValueError("ts_code is required")
-
         trade_date = kwargs.get("trade_date")
         start_date = kwargs.get("start_date")
         end_date = kwargs.get("end_date")
 
+        # Batch mode: extract for all stocks if ts_code not provided
+        if not ts_code:
+            if not self.db:
+                raise ValueError("Database not initialized for batch mode")
+
+            self.logger.info("Extracting cyq_chips data for all stocks (batch mode)")
+
+            # Get all stock codes from stock_basic table
+            stocks_query = (
+                "SELECT DISTINCT ts_code FROM ods_stock_basic WHERE list_status = 'L'"
+            )
+            stocks_df = self.db.execute_query(stocks_query)
+
+            if stocks_df.empty:
+                self.logger.warning("No stocks found in stock_basic table")
+                return pd.DataFrame()
+
+            all_data = []
+            total_records = 0
+            for idx, row in stocks_df.iterrows():
+                stock_code = row["ts_code"]
+                try:
+                    # Report progress every 10 stocks
+                    if idx % 10 == 0 or idx == len(stocks_df) - 1:
+                        progress = ((idx + 1) / len(stocks_df)) * 100
+                        self.update_progress(progress, total_records)
+
+                    data = extractor.extract(
+                        ts_code=stock_code,
+                        trade_date=trade_date,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+
+                    if not data.empty:
+                        all_data.append(data)
+                        total_records += len(data)
+
+                    # Rate limiting between API calls
+                    import time
+
+                    time.sleep(0.1)
+
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to extract cyq_chips for {stock_code}: {e}"
+                    )
+                    continue
+
+            if not all_data:
+                self.logger.warning("No cyq_chips data extracted for any stock")
+                return pd.DataFrame()
+
+            combined_data = pd.concat(all_data, ignore_index=True)
+            # Add system columns for batch mode
+            combined_data["version"] = int(datetime.now().timestamp())
+            combined_data["_ingested_at"] = datetime.now()
+            self.logger.info(
+                f"Extracted {len(combined_data)} cyq_chips records from {len(all_data)} stocks"
+            )
+            return combined_data
+
+        # Single stock mode
         self.logger.info(f"Extracting cyq_chips data for {ts_code}")
 
         data = extractor.extract(
@@ -167,6 +227,16 @@ class TuShareCyqChipsPlugin(BasePlugin):
             return {"status": "no_data", "loaded_records": 0}
 
         results = {"status": "success", "tables_loaded": [], "total_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_cyq_chips", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
 
         try:
             table_name = "ods_cyq_chips"

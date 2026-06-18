@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare ETF基准指数列表 from etf_index API",
+  "description": "TuShare ETF 基准指数列表（etf_index API）",
   "sync_mode": "full_replace",
   "schedule": {
     "frequency": "weekly",
@@ -28,5 +28,9 @@
       "required": false,
       "description": "指数基期（格式：YYYYMMDD）"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

@@ -145,6 +145,16 @@ class TuShareAdjFactorPlugin(BasePlugin):
             self.logger.warning("No data to load")
             return {"status": "no_data", "loaded_records": 0}
 
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_adj_factor", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
+
         try:
             self.logger.info(f"Loading {len(data)} records into ods_adj_factor")
             ods_data = data.copy()

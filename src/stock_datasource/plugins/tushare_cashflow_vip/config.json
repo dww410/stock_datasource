@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 60,
   "retry_attempts": 3,
-  "description": "TuShare cash flow VIP data plugin (batch mode, requires 5000 points)",
+  "description": "TuShare 现金流量表 VIP 数据（批量模式，需 5000 积分）",
   "schedule": {
     "frequency": "monthly",
     "time": "19:00"
@@ -58,5 +58,9 @@
       "required": false,
       "description": "是否计算报表: 0=实际报表, 1=计算报表"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

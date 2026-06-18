@@ -1,10 +1,12 @@
 """TuShare daily_info data plugin implementation."""
 
 import json
-from datetime import datetime
+import math
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from stock_datasource.core.base_plugin import PluginCategory, PluginRole
@@ -67,16 +69,55 @@ class TuShareDailyInfoPlugin(BasePlugin):
     def transform_data(self, data: pd.DataFrame) -> pd.DataFrame:
         if data.empty:
             return data
+        data = data.copy()
         numeric_columns = data.columns.difference(
             ["ts_code", "trade_date", "ts_name", "exchange"]
         )
         for col in numeric_columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
         if "trade_date" in data.columns:
-            data["trade_date"] = pd.to_datetime(
-                data["trade_date"], format="%Y%m%d"
-            ).dt.date
+            data["trade_date"] = data["trade_date"].map(self._parse_trade_date)
+        for col in data.columns:
+            data[col] = pd.Series(
+                [self._safe_value(value) for value in data[col]],
+                index=data.index,
+                dtype=object,
+            )
         return data
+
+    @staticmethod
+    def _parse_trade_date(value: Any) -> date | None:
+        if pd.isna(value):
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+        return pd.to_datetime(text).date()
+
+    @staticmethod
+    def _safe_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if pd.isna(value):
+            return None
+        if isinstance(value, (date, datetime, str)):
+            return value
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            value = float(value)
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
 
     def load_data(self, data: pd.DataFrame) -> dict[str, Any]:
         if not self.db:
@@ -85,6 +126,16 @@ class TuShareDailyInfoPlugin(BasePlugin):
             return {"status": "no_data", "loaded_records": 0}
 
         results = {"status": "success", "tables_loaded": [], "total_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_daily_info", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
         try:
             schema = self.get_schema()
             table_name = schema.get("table_name")

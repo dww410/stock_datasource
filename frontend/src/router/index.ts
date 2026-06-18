@@ -291,6 +291,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/user/UserCenter.vue'),
     meta: { title: 'MCP调用统计', requiresAuth: true }
   },
+  {
+    path: '/user/api-keys',
+    name: 'UserApiKeys',
+    component: () => import('@/views/user/UserCenter.vue'),
+    meta: { title: 'API Key', requiresAuth: true }
+  },
   // Legacy routes redirect
   {
     path: '/report',

@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 """Run financial statement plugins to extract data from TuShare API and load to backup database."""
 
-import sys
+import logging
 import os
+import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from stock_datasource.core.plugin_manager import plugin_manager
-from stock_datasource.models.database import db_client
-from datetime import datetime
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure to use backup database only
-os.environ['BACKUP_CLICKHOUSE_HOST'] = os.getenv('BACKUP_CLICKHOUSE_HOST', '129.28.41.236')
-os.environ['BACKUP_CLICKHOUSE_PORT'] = os.getenv('BACKUP_CLICKHOUSE_PORT', '9000')
-os.environ['BACKUP_CLICKHOUSE_USER'] = os.getenv('BACKUP_CLICKHOUSE_USER', 'default')
-os.environ['BACKUP_CLICKHOUSE_PASSWORD'] = os.getenv('BACKUP_CLICKHOUSE_PASSWORD', 'BB7rfRUdCPWLzkoy55hhKg3o')
-os.environ['BACKUP_CLICKHOUSE_DATABASE'] = os.getenv('BACKUP_CLICKHOUSE_DATABASE', 'stock_datasource')
-
-# Temporarily disable primary database to only use backup
-os.environ['CLICKHOUSE_HOST'] = os.getenv('BACKUP_CLICKHOUSE_HOST')
-os.environ['CLICKHOUSE_PORT'] = os.getenv('BACKUP_CLICKHOUSE_PORT')
-os.environ['CLICKHOUSE_USER'] = os.getenv('BACKUP_CLICKHOUSE_USER')
-os.environ['CLICKHOUSE_PASSWORD'] = os.getenv('BACKUP_CLICKHOUSE_PASSWORD')
+# Configure to use backup database only when backup settings are provided
+for backup_key, primary_key in {
+    'BACKUP_CLICKHOUSE_HOST': 'CLICKHOUSE_HOST',
+    'BACKUP_CLICKHOUSE_PORT': 'CLICKHOUSE_PORT',
+    'BACKUP_CLICKHOUSE_USER': 'CLICKHOUSE_USER',
+    'BACKUP_CLICKHOUSE_PASSWORD': 'CLICKHOUSE_PASSWORD',
+    'BACKUP_CLICKHOUSE_DATABASE': 'CLICKHOUSE_DATABASE',
+}.items():
+    value = os.getenv(backup_key)
+    if value:
+        os.environ[primary_key] = value
 
 PLUGINS = [
     'tushare_income',
@@ -50,37 +48,21 @@ def run_plugin(plugin_name):
             print(f"❌ Plugin {plugin_name} not found")
             return False
 
-        # Extract data from TuShare API
-        print(f"[{datetime.now()}] Extracting data from TuShare API...")
-        data = plugin.extract_data()
+        print(f"[{datetime.now()}] Running plugin lifecycle...")
+        result = plugin.run()
+        status = result.get('status')
+        load_result = result.get('steps', {}).get('load', {})
 
-        if data is None or data.empty:
+        if status == 'success':
+            loaded = load_result.get('loaded_records', load_result.get('total_records', 0))
+            print(f"✅ Successfully loaded {loaded} records to backup database")
+            return True
+        if status == 'no_data':
             print(f"⚠️ No data extracted from TuShare API for {plugin_name}")
             return True
 
-        print(f"[{datetime.now()}] Extracted {len(data)} records")
-
-        # Transform data
-        print(f"[{datetime.now()}] Transforming data...")
-        data = plugin.transform_data(data)
-
-        # Validate data
-        print(f"[{datetime.now()}] Validating data...")
-        if not plugin.validate_data(data):
-            print(f"❌ Data validation failed for {plugin_name}")
-            return False
-
-        # Load data to backup database
-        print(f"[{datetime.now()}] Loading data to backup database...")
-        result = plugin.load_data(data)
-
-        if result.get('status') == 'success':
-            loaded = result.get('loaded_records', 0)
-            print(f"✅ Successfully loaded {loaded} records to backup database")
-            return True
-        else:
-            print(f"❌ Failed to load data: {result.get('error', 'Unknown error')}")
-            return False
+        print(f"❌ Failed to run plugin: {result.get('error', 'Unknown error')}")
+        return False
 
     except Exception as e:
         print(f"❌ Error running plugin {plugin_name}: {e}")
@@ -92,7 +74,7 @@ def main():
     """Run all financial statement plugins."""
     print(f"\n{'='*60}")
     print(f"[{datetime.now()}] Starting financial statement plugins")
-    print(f"Target: Backup Database (129.28.41.236)")
+    print("Target: configured ClickHouse database")
     print(f"{'='*60}\n")
 
     # Discover all plugins

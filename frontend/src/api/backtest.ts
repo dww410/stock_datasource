@@ -28,6 +28,7 @@ export interface BacktestRequest {
 
 export interface Trade {
   date: string
+  symbol?: string
   direction: 'buy' | 'sell'
   price: number
   quantity: number

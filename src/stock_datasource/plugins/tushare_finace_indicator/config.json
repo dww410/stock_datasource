@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare financial indicators data plugin",
+  "description": "TuShare 财务指标数据",
   "schedule": {
     "frequency": "monthly",
     "time": "18:00"
@@ -30,5 +30,9 @@
       "required": true,
       "description": "End date in YYYYMMDD format"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

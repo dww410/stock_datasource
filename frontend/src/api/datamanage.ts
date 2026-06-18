@@ -68,6 +68,8 @@ export interface PluginInfo {
   available_data_sources: string[]
   dependencies: string[]
   optional_dependencies: string[]
+  last_ingested_at?: string
+  is_stale?: boolean
 }
 
 export interface PluginSchedule {
@@ -95,6 +97,11 @@ export interface PluginSchema {
   comment?: string
 }
 
+export interface PluginCoolingConfig {
+  rate_limit_seconds: number
+  ip_limit_seconds: number
+}
+
 export interface PluginConfig {
   enabled: boolean
   rate_limit: number
@@ -105,6 +112,7 @@ export interface PluginConfig {
   data_source?: string
   available_data_sources: string[]
   parameters_schema: Record<string, any>
+  cooling?: PluginCoolingConfig
 }
 
 export interface PluginStatus {
@@ -112,6 +120,8 @@ export interface PluginStatus {
   missing_count: number
   missing_dates: string[]
   total_records: number
+  last_ingested_at?: string
+  is_stale?: boolean
 }
 
 export interface PluginDetail {

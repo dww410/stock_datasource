@@ -140,6 +140,7 @@ class SyncTask(BaseModel):
     trade_dates: list[str] = []
     data_source: str | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     # User tracking fields
@@ -162,6 +163,8 @@ class PluginStatus(BaseModel):
     missing_count: int = 0
     missing_dates: list[str] = []
     total_records: int = 0
+    last_ingested_at: str | None = None
+    is_stale: bool = False
 
 
 class PluginColumn(BaseModel):
@@ -187,6 +190,13 @@ class PluginSchema(BaseModel):
     comment: str | None = None
 
 
+class PluginCoolingConfig(BaseModel):
+    """Cooling configuration for plugin rate limiting."""
+
+    rate_limit_seconds: int = 360
+    ip_limit_seconds: int = 600
+
+
 class PluginConfig(BaseModel):
     """Plugin configuration."""
 
@@ -199,6 +209,7 @@ class PluginConfig(BaseModel):
     data_source: str | None = None
     available_data_sources: list[str] = []
     parameters_schema: dict[str, Any] = {}
+    cooling: PluginCoolingConfig | None = None
 
 
 class PluginInfo(BaseModel):
@@ -221,6 +232,8 @@ class PluginInfo(BaseModel):
     available_data_sources: list[str] = []
     dependencies: list[str] = []
     optional_dependencies: list[str] = []
+    last_ingested_at: str | None = None
+    is_stale: bool = False
 
 
 class PluginDetail(BaseModel):

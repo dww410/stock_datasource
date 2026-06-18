@@ -1,8 +1,9 @@
 """Base plugin class for stock data source."""
 
 import json
+import time
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,33 @@ class BasePlugin(ABC):
         self._schema = None
         self._plugin_dir = None
         self.db = None
+        self._task_id: str | None = None  # Current task ID for progress updates
         self._init_db()
+
+    def set_task_context(self, task_id: str) -> None:
+        """Set task context for progress reporting.
+
+        Args:
+            task_id: The current task ID
+        """
+        self._task_id = task_id
+
+    def update_progress(self, progress: float, records_processed: int = 0) -> None:
+        """Update task progress.
+
+        Args:
+            progress: Progress percentage (0-100)
+            records_processed: Number of records processed so far
+        """
+        if not self._task_id:
+            return
+
+        try:
+            from stock_datasource.services.task_queue import task_queue
+
+            task_queue.update_progress(self._task_id, progress, records_processed)
+        except Exception as e:
+            self.logger.warning(f"Failed to update progress: {e}")
 
     @property
     @abstractmethod
@@ -360,6 +387,123 @@ class BasePlugin(ABC):
             self.logger.error(f"Failed to truncate table {table_name}: {e}")
             return False
 
+    def _deduplicate_before_load(
+        self,
+        table_name: str,
+        data: pd.DataFrame,
+        date_column: str = "trade_date",
+        skip_if_exists: bool = True,
+    ) -> bool:
+        """Handle existing data before load with smart strategy.
+
+        Two strategies:
+        1. skip_if_exists=True (default): If data for the date already exists, skip
+           loading entirely. Good for incremental sync of stable historical data.
+        2. skip_if_exists=False: Delete existing data first, then insert fresh.
+           Good for force-refresh when source data may have been corrected.
+
+        Args:
+            table_name: Target table name
+            data: DataFrame being loaded
+            date_column: Name of the date column in the table
+            skip_if_exists: Strategy choice
+
+        Returns:
+            True if should proceed with loading, False if should skip
+        """
+        if not self.db:
+            self.logger.warning("Database not initialized, skipping deduplication")
+            return True
+
+        if data.empty:
+            return False
+
+        if date_column not in data.columns:
+            # Try alternative date column names
+            alt_cols = ["end_date", "ann_date", "cal_date", "report_date", "surv_date"]
+            found = False
+            for alt in alt_cols:
+                if alt in data.columns:
+                    date_column = alt
+                    found = True
+                    break
+            if not found:
+                self.logger.warning(
+                    f"Date column '{date_column}' not found in data, "
+                    "skipping deduplication check"
+                )
+                return True
+
+        try:
+            # Get unique values from date column
+            date_values = data[date_column].dropna().unique()
+
+            if len(date_values) == 0:
+                self.logger.warning("No valid dates found for deduplication")
+                return True
+
+            # Convert to YYYY-MM-DD string format for SQL
+            dates_sql = []
+            for d in date_values:
+                if isinstance(d, date):
+                    dates_sql.append(d.strftime("%Y-%m-%d"))
+                elif isinstance(d, str):
+                    if len(d) == 8 and d.isdigit():  # YYYYMMDD
+                        dates_sql.append(f"{d[:4]}-{d[4:6]}-{d[6:8]}")
+                    else:
+                        dates_sql.append(d)
+                elif isinstance(d, int) and len(str(d)) == 8:  # YYYYMMDD as int
+                    s = str(d)
+                    dates_sql.append(f"{s[:4]}-{s[4:6]}-{s[6:8]}")
+                else:
+                    # Try pandas datetime conversion
+                    try:
+                        import pandas as pd
+                        dt = pd.to_datetime(d)
+                        dates_sql.append(dt.strftime("%Y-%m-%d"))
+                    except Exception:
+                        pass
+
+            if not dates_sql:
+                self.logger.warning("No valid dates could be parsed for deduplication")
+                return True
+
+            dates_str = "','".join(dates_sql)
+
+            # Check if data already exists for these dates
+            check_query = f"""
+                SELECT COUNT(*) as cnt FROM {table_name} FINAL
+                WHERE {date_column} IN ('{dates_str}')
+            """
+            result = self.db.execute_query(check_query)
+            existing_rows = int(result.iloc[0, 0]) if not result.empty else 0
+
+            if existing_rows > 0:
+                if skip_if_exists:
+                    self.logger.info(
+                        f"Data already exists for {len(dates_sql)} dates in {table_name} "
+                        f"({existing_rows} rows), skipping load (use force=True to refresh)"
+                    )
+                    return False
+                else:
+                    # Force refresh mode: delete existing data first
+                    self.logger.info(
+                        f"Force refreshing {table_name}: deleting {existing_rows} existing rows "
+                        f"for {len(dates_sql)} dates"
+                    )
+                    delete_query = f"DELETE FROM {table_name} WHERE {date_column} IN ('{dates_str}')"
+                    self.db.execute_query(delete_query)
+            else:
+                self.logger.info(
+                    f"No existing data for {len(dates_sql)} dates in {table_name}, proceeding with load"
+                )
+
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"Failed to deduplicate: {e}, proceeding anyway")
+            return True
+
     def should_run_today(self, current_date=None) -> bool:
         """Check if plugin should run on the given date.
 
@@ -488,6 +632,193 @@ class BasePlugin(ABC):
             result["status"] = "failed"
             result["error"] = str(e)
             return result
+
+    def run_backfill(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        max_retries: int | None = None,
+        max_fails: int | None = None,
+    ) -> dict[str, Any]:
+        """Run historical backfill: iterate through trading days and fill missing data.
+
+        Flow:
+        1. Read ``default_start_date`` / ``default_end_date`` / ``retry_attempts`` /
+           ``max_fails`` from ``config.json`` (CLI args take precedence).
+        2. Query ``ods_trade_calendar`` for all trading days in range.
+        3. Query the target table for already-loaded dates.
+        4. For each pending date, run ``extract → validate → transform → load``.
+        5. Log progress every 100 days; abort when consecutive failures reach max_fails.
+
+        Returns:
+            Result dict with ``steps.backfill`` containing counts and errors.
+        """
+        result: dict[str, Any] = {
+            "plugin": self.name,
+            "status": "success",
+            "steps": {},
+            "parameters": {"start_date": start_date, "end_date": end_date},
+        }
+
+        if not self.db:
+            result["status"] = "failed"
+            result["error"] = "Database not initialized"
+            return result
+
+        config = self.get_config()
+        start_str = start_date or config.get("default_start_date")
+        end_str = end_date or config.get("default_end_date", datetime.now().strftime("%Y%m%d"))
+        retries = max_retries if max_retries is not None else int(config.get("retry_attempts", 5))
+        max_fail = max_fails if max_fails is not None else int(config.get("max_fails", 10))
+
+        if not start_str:
+            result["status"] = "failed"
+            result["error"] = "start_date not provided and not set in config.json"
+            return result
+
+        try:
+            start_d = datetime.strptime(start_str, "%Y%m%d").date()
+            end_d = datetime.strptime(end_str, "%Y%m%d").date()
+        except ValueError as e:
+            result["status"] = "failed"
+            result["error"] = f"Invalid date format (expected YYYYMMDD): {e}"
+            return result
+
+        schema = self.get_schema()
+        table_name = schema.get("table_name", "") if schema else ""
+        if schema and table_name:
+            self._ensure_table_exists(schema)
+
+        # 1. Fetch trading days
+        try:
+            cal_df = self.db.execute_query(
+                "SELECT cal_date FROM ods_trade_calendar "
+                "WHERE cal_date >= %(s)s AND cal_date <= %(e)s AND is_open = 1 "
+                "ORDER BY cal_date",
+                params={"s": start_d, "e": end_d},
+            )
+            days: list[date] = (cal_df["cal_date"].tolist() if not cal_df.empty else [])
+        except Exception as e:
+            result["status"] = "failed"
+            result["error"] = f"Failed to query ods_trade_calendar: {e}"
+            return result
+
+        # 2. Determine already-loaded dates
+        loaded: set[date] = set()
+        if table_name:
+            try:
+                loaded_df = self.db.execute_query(
+                    f"SELECT DISTINCT trade_date FROM {table_name} FINAL "
+                    "WHERE trade_date >= %(s)s AND trade_date <= %(e)s",
+                    params={"s": start_d, "e": end_d},
+                )
+                if not loaded_df.empty and "trade_date" in loaded_df.columns:
+                    loaded = set(loaded_df["trade_date"].tolist())
+            except Exception:
+                loaded = set()
+
+        pending = [d for d in days if d not in loaded]
+        self.logger.info(
+            f"[{self.name}] Backfill: {len(days)} trading days, "
+            f"{len(loaded)} loaded, {len(pending)} pending"
+        )
+
+        if not pending:
+            result["steps"]["backfill"] = {
+                "start_date": start_str,
+                "end_date": end_str,
+                "total_days": len(days),
+                "loaded_days": len(loaded),
+                "pending_days": 0,
+                "ok": 0,
+                "fail": 0,
+                "errors": [],
+            }
+            return result
+
+        pivot_len = len(pending)
+        ok = 0
+        fail = 0
+        errors: list[dict[str, str]] = []
+        t0 = time.time()
+
+        for d in pending:
+            ds = d.strftime("%Y%m%d")
+            extracted = None
+            last_err: str | None = None
+
+            for att in range(1, retries + 1):
+                try:
+                    extracted = self.extract_data(trade_date=ds)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    if att < retries:
+                        time.sleep(3 * att)
+
+            if last_err:
+                fail += 1
+                errors.append({"trade_date": ds, "error": last_err})
+                self.logger.warning(f"[{self.name}] {ds} FAILED: {last_err}")
+                if fail >= max_fail:
+                    self.logger.warning(
+                        f"[{self.name}] Aborting backfill: consecutive failures ({fail}) >= max_fails ({max_fail})"
+                    )
+                    break
+                continue
+
+            if extracted is None or extracted.empty:
+                ok += 1
+                continue
+
+            if not self.validate_data(extracted):
+                fail += 1
+                errors.append({"trade_date": ds, "error": "validation_failed"})
+                if fail >= max_fail:
+                    self.logger.warning(
+                        f"[{self.name}] Aborting backfill: consecutive failures ({fail}) >= max_fails ({max_fail})"
+                    )
+                    break
+                continue
+
+            transformed = self.transform_data(extracted)
+            load_result = self.load_data(transformed)
+            if load_result.get("status") == "success":
+                ok += 1
+            else:
+                fail += 1
+                errors.append({"trade_date": ds, "error": str(load_result.get("error", ""))})
+                if fail >= max_fail:
+                    self.logger.warning(
+                        f"[{self.name}] Aborting backfill: consecutive failures ({fail}) >= max_fails ({max_fail})"
+                    )
+                    break
+
+            # Progress log — never divide by zero
+            done = ok + fail
+            if done % 100 == 0:
+                elapsed = max(time.time() - t0, 1e-6)
+                speed = ok / elapsed
+                eta_min = ((pivot_len - done) / speed / 60) if speed > 0 else float("inf")
+                self.logger.info(
+                    f"[{self.name}] [{done}/{pivot_len}] ok={ok} fail={fail} "
+                    f"eta={eta_min:.0f}min last={ds}"
+                )
+
+        result["steps"]["backfill"] = {
+            "start_date": start_str,
+            "end_date": end_str,
+            "total_days": len(days),
+            "loaded_days": len(loaded),
+            "pending_days": pivot_len,
+            "ok": ok,
+            "fail": fail,
+            "errors": errors[:20],
+        }
+        if fail > 0:
+            result["status"] = "warning"
+        return result
 
     @abstractmethod
     def load_data(self, data: Any) -> dict[str, Any]:

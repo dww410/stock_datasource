@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare financial audit opinion data plugin",
+  "description": "TuShare 财务审计意见数据",
   "schedule": {
     "frequency": "monthly",
     "time": "19:00"
@@ -37,5 +37,9 @@
       "required": false,
       "description": "Report period (e.g., 20231231)"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

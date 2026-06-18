@@ -521,13 +521,28 @@ export const useDataManageStore = defineStore('datamanage', () => {
 
   // Polling for task updates
   let pollInterval: ReturnType<typeof setInterval> | null = null
+  let currentPollDays: number = 30
+  let currentPollLimit: number = 100
+  let currentPollStatus: string | undefined = undefined
+  let currentPollTriggerType: string | undefined = undefined
 
-  const startTaskPolling = (intervalMs: number = 3000) => {
+  const startTaskPolling = (intervalMs: number = 3000, days?: number, limit?: number, status?: string, triggerType?: string) => {
+    // Update polling params if provided
+    if (days !== undefined) currentPollDays = days
+    if (limit !== undefined) currentPollLimit = limit
+    if (status !== undefined) currentPollStatus = status
+    if (triggerType !== undefined) currentPollTriggerType = triggerType
+
     if (pollInterval) return
     pollInterval = setInterval(() => {
-      const hasRunning = syncTasks.value.some(t => t.status === 'running' || t.status === 'pending')
-      if (hasRunning) {
+      // Check both single tasks and batch executions
+      const hasRunningTasks = syncTasks.value.some(t => t.status === 'running' || t.status === 'pending')
+      const hasRunningExecutions = scheduleHistory.value.some(e => e.status === 'running')
+
+      // Always refresh both if any is running, even if only one has running status
+      if (hasRunningTasks || hasRunningExecutions) {
         fetchSyncTasks()
+        fetchScheduleHistory(currentPollDays, currentPollLimit, currentPollStatus, currentPollTriggerType)
       }
     }, intervalMs)
   }

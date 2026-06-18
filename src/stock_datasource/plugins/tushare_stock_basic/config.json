@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare stock basic information from stock_basic API",
+  "description": "TuShare 股票基础信息（stock_basic API）",
   "sync_mode": "full_replace",
   "schedule": {
     "frequency": "weekly",
@@ -13,9 +13,17 @@
   "parameters_schema": {
     "list_status": {
       "type": "string",
-      "enum": ["L", "D", "P"],
+      "enum": [
+        "L",
+        "D",
+        "P"
+      ],
       "default": "L",
       "description": "上市状态: L上市 D退市 P暂停上市"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

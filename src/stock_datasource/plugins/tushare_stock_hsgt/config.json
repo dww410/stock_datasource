@@ -17,7 +17,12 @@
     },
     "type": {
       "type": "string",
-      "enum": ["HK_SZ", "SZ_HK", "HK_SH", "SH_HK"],
+      "enum": [
+        "HK_SZ",
+        "SZ_HK",
+        "HK_SH",
+        "SH_HK"
+      ],
       "required": true,
       "description": "类型: HK_SZ深股通 SZ_HK港股通(深) HK_SH沪股通 SH_HK港股通(沪)"
     },
@@ -38,5 +43,9 @@
       "required": false,
       "description": "结束日期，格式YYYYMMDD"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

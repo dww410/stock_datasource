@@ -3,7 +3,7 @@
   "rate_limit": 30,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare index factor pro data plugin (100+ technical indicators)",
+  "description": "TuShare 指数技术因子数据（100+ 技术指标）",
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
@@ -36,5 +36,9 @@
       "required": false,
       "description": "Index code (e.g., 000300.SH)"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

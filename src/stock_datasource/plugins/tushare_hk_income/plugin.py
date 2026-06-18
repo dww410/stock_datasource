@@ -214,6 +214,16 @@ class TuShareHKIncomePlugin(BasePlugin):
 
         results = {"status": "success", "tables_loaded": [], "total_records": 0}
 
+        # Deduplicate: delete existing data for the dates being loaded
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_hk_income", data, date_column="end_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
+
         try:
             table_name = "ods_hk_income"
             self.logger.info(f"Loading {len(data)} records into {table_name}")

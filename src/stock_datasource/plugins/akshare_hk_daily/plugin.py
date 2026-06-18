@@ -10,7 +10,12 @@ import pandas as pd
 from stock_datasource.core.base_plugin import PluginCategory, PluginRole
 from stock_datasource.plugins import BasePlugin
 
-from .extractor import extractor
+from .extractor import (
+    akshare_to_ts_code,
+    extractor,
+    map_akshare_to_tushare,
+    ts_code_to_akshare,
+)
 
 
 class AKShareHKDailyPlugin(BasePlugin):
@@ -56,43 +61,77 @@ class AKShareHKDailyPlugin(BasePlugin):
     def extract_data(self, **kwargs) -> pd.DataFrame:
         """Extract Hong Kong daily data from AKShare."""
         symbol = kwargs.get("symbol")
+        ts_code = kwargs.get("ts_code")
         start_date = kwargs.get("start_date")
         end_date = kwargs.get("end_date")
+        max_stocks = kwargs.get("max_stocks")
 
-        if not symbol:
-            raise ValueError("symbol is required")
+        if symbol or ts_code:
+            target_ts_code = akshare_to_ts_code(ts_code or symbol)
+            target_symbol = ts_code_to_akshare(target_ts_code)
+            if symbol and ts_code and akshare_to_ts_code(symbol) != target_ts_code:
+                raise ValueError(
+                    f"Conflicting symbol and ts_code: symbol={symbol}, ts_code={ts_code}"
+                )
+            return self._extract_single_stock(target_ts_code, target_symbol, start_date, end_date)
 
-        self.logger.info(f"Extracting Hong Kong daily data for {symbol}")
+        if not self.db:
+            raise ValueError("Database is required for batch HK daily extraction")
 
-        # Use the plugin's extractor instance
-        data = extractor.extract(symbol, start_date, end_date)
+        stock_codes = self._get_hk_stock_list()
+        if max_stocks:
+            stock_codes = stock_codes[: int(max_stocks)]
 
-        if data.empty:
-            self.logger.warning(f"No Hong Kong daily data found for {symbol}")
+        frames = []
+        for stock_ts_code in stock_codes:
+            stock_symbol = ts_code_to_akshare(stock_ts_code)
+            try:
+                frame = self._extract_single_stock(
+                    stock_ts_code, stock_symbol, start_date, end_date
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to extract Hong Kong daily data for {stock_ts_code}: {e}")
+                continue
+            if not frame.empty:
+                frames.append(frame)
+
+        if not frames:
+            self.logger.warning("No Hong Kong daily data found")
             return pd.DataFrame()
 
-        # Map AKShare columns to our schema
-        # AKShare returns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
-        data_mapped = pd.DataFrame()
-        data_mapped["symbol"] = symbol
-        data_mapped["trade_date"] = pd.to_datetime(data["日期"]).dt.date
-        data_mapped["open"] = pd.to_numeric(data["开盘"], errors="coerce")
-        data_mapped["high"] = pd.to_numeric(data["最高"], errors="coerce")
-        data_mapped["low"] = pd.to_numeric(data["最低"], errors="coerce")
-        data_mapped["close"] = pd.to_numeric(data["收盘"], errors="coerce")
-        data_mapped["volume"] = pd.to_numeric(data["成交量"], errors="coerce").astype(
-            "Int64"
-        )
-        data_mapped["amount"] = pd.to_numeric(data["成交额"], errors="coerce")
+        return pd.concat(frames, ignore_index=True)
 
-        # Ensure proper data types and add system columns
-        data_mapped["version"] = int(datetime.now().timestamp())
-        data_mapped["_ingested_at"] = datetime.now()
+    def _extract_single_stock(
+        self,
+        ts_code: str,
+        symbol: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """Extract and map one Hong Kong stock."""
+        self.logger.info(f"Extracting Hong Kong daily data for {ts_code}")
+        data = extractor.extract(symbol, start_date, end_date)
+        if data.empty:
+            self.logger.warning(f"No Hong Kong daily data found for {ts_code}")
+            return pd.DataFrame()
 
-        self.logger.info(
-            f"Extracted {len(data_mapped)} Hong Kong daily records for {symbol}"
-        )
-        return data_mapped
+        mapped = map_akshare_to_tushare(data, ts_code)
+        self.logger.info(f"Extracted {len(mapped)} Hong Kong daily records for {ts_code}")
+        return mapped
+
+    def _get_hk_stock_list(self) -> list[str]:
+        """Get listed Hong Kong stock universe from ods_hk_basic using self.db."""
+        query = """
+        SELECT DISTINCT ts_code
+        FROM ods_hk_basic
+        WHERE list_status = 'L'
+        ORDER BY ts_code
+        """
+        data = self.db.execute_query(query)
+        if data is None or data.empty:
+            self.logger.warning("No HK stocks found in ods_hk_basic table")
+            return []
+        return data["ts_code"].dropna().astype(str).tolist()
 
     def validate_data(self, data: pd.DataFrame) -> bool:
         """Validate Hong Kong daily data."""
@@ -100,7 +139,7 @@ class AKShareHKDailyPlugin(BasePlugin):
             self.logger.warning("Empty Hong Kong daily data")
             return False
 
-        required_columns = ["symbol", "trade_date", "close"]
+        required_columns = ["ts_code", "trade_date", "close"]
         missing_columns = [col for col in required_columns if col not in data.columns]
 
         if missing_columns:
@@ -108,13 +147,12 @@ class AKShareHKDailyPlugin(BasePlugin):
             return False
 
         # Check for null values in key fields
-        null_symbols = data["symbol"].isnull().sum()
+        null_symbols = data["ts_code"].isnull().sum()
         null_dates = data["trade_date"].isnull().sum()
-        null_close = data["close"].isnull().sum()
 
         if null_symbols > 0 or null_dates > 0:
             self.logger.error(
-                f"Found null values: symbol={null_symbols}, trade_date={null_dates}"
+                f"Found null values: ts_code={null_symbols}, trade_date={null_dates}"
             )
             return False
 
@@ -145,6 +183,16 @@ class AKShareHKDailyPlugin(BasePlugin):
         if data.empty:
             self.logger.warning("No data to load")
             return {"status": "no_data", "loaded_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_hk_daily", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
 
         try:
             self.logger.info(f"Loading {len(data)} records into ods_hk_daily")

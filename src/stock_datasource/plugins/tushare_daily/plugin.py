@@ -215,6 +215,29 @@ class TuShareDailyPlugin(BasePlugin):
         results = {"status": "success", "tables_loaded": [], "total_records": 0}
 
         try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            # Use force=True in load() to force refresh instead of skip
+            should_load_ods = self._deduplicate_before_load(
+                "ods_daily", data, date_column="trade_date", skip_if_exists=True
+            )
+            if not should_load_ods:
+                results["skipped"] = True
+                results["message"] = "Data already exists, skipped loading"
+                return results
+
+            # Also delete from fact_daily_bar since we need to reload both
+            # Note: This is a 2-table plugin, handle fact separately
+            # Get unique dates being loaded
+            unique_dates = data["trade_date"].dropna().unique().tolist()
+            if unique_dates:
+                dates_str = "','".join(
+                    d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                    for d in unique_dates
+                )
+                self.db.execute_query(
+                    f"DELETE FROM fact_daily_bar WHERE trade_date IN ('{dates_str}')"
+                )
+
             # Load into ODS table
             self.logger.info(f"Loading {len(data)} records into ods_daily")
             ods_data = data.copy()

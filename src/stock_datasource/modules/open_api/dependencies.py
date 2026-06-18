@@ -33,6 +33,10 @@ async def _extract_api_key(
         raw_key = credentials.credentials
     elif api_key:
         raw_key = api_key
+    else:
+        raw_key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+
+    raw_key = raw_key.strip() if raw_key else None
 
     if not raw_key or not raw_key.startswith("sk-"):
         raise HTTPException(

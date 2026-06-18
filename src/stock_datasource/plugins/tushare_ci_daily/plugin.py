@@ -55,25 +55,21 @@ class TuShareCiDailyPlugin(BasePlugin):
         start_date = kwargs.get("start_date")
         end_date = kwargs.get("end_date")
 
-        if ts_code and start_date and end_date:
-            data = extractor.extract_by_date_range(ts_code, start_date, end_date)
-        elif trade_date:
+        if trade_date:
             # Support trade_date for scheduled tasks
-            data = extractor.extract(trade_date, ts_code)
-        elif start_date and end_date:
-            # Support date range without ts_code (fetch all)
-            data = extractor.extract_by_date_range(ts_code, start_date, end_date)
-        else:
-            # For scheduled tasks without parameters, this plugin requires trade_date
-            self.logger.warning("No parameters provided, skipping extraction")
-            return pd.DataFrame()
-        return data
+            return extractor.extract(trade_date, ts_code)
+
+        if start_date and end_date:
+            return extractor.extract_by_date_range(ts_code, start_date, end_date)
+
+        self.logger.warning("No parameters provided, skipping extraction")
+        return pd.DataFrame()
 
     def transform_data(self, data: pd.DataFrame) -> pd.DataFrame:
         if data.empty:
             return data
-        if "pct_change" in data.columns and "pct_chg" not in data.columns:
-            data = data.rename(columns={"pct_change": "pct_chg"})
+        if "pct_chg" in data.columns and "pct_change" not in data.columns:
+            data = data.rename(columns={"pct_chg": "pct_change"})
         numeric_columns = data.columns.difference(["ts_code", "trade_date", "name"])
         for col in numeric_columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
@@ -89,22 +85,49 @@ class TuShareCiDailyPlugin(BasePlugin):
         if data.empty:
             return {"status": "no_data", "loaded_records": 0}
 
-        results = {"status": "success", "tables_loaded": [], "total_records": 0}
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_ci_daily", data, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
         try:
             schema = self.get_schema()
             table_name = schema.get("table_name")
-            data["version"] = int(datetime.now().timestamp())
-            data["_ingested_at"] = datetime.now()
-            self.db.insert_dataframe(table_name, data)
-            results["tables_loaded"].append({"table": table_name, "records": len(data)})
-            results["total_records"] = len(data)
+            if not table_name:
+                raise ValueError("table_name not found in schema.json")
+
+            ods_data = data.copy()
+            ods_data["version"] = int(datetime.now().timestamp())
+            ods_data["_ingested_at"] = datetime.now()
+            ods_data = self._prepare_data_for_insert(table_name, ods_data)
+            self.db.insert_dataframe(table_name, ods_data)
+            return {
+                "status": "success",
+                "loaded_records": len(ods_data),
+                "table": table_name,
+            }
         except Exception as e:
-            results["status"] = "failed"
-            results["error"] = str(e)
-        return results
+            return {"status": "failed", "error": str(e)}
 
     def validate_data(self, data: pd.DataFrame) -> bool:
         if data.empty:
             return False
         required_columns = ["ts_code", "trade_date"]
         return all(col in data.columns for col in required_columns)
+
+    def run(self, **kwargs) -> dict[str, Any]:
+        # When specific params are given, use single-run pipeline.
+        if (
+            kwargs.get("trade_date")
+            or kwargs.get("start_date")
+            or kwargs.get("end_date")
+            or kwargs.get("ts_code")
+        ):
+            return super().run(**kwargs)
+
+        # Otherwise, delegate to the standardized backfill.
+        return self.run_backfill()

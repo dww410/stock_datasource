@@ -3,7 +3,7 @@
   "rate_limit": 500,
   "timeout": 90,
   "retry_attempts": 3,
-  "description": "TuShare index basic information plugin",
+  "description": "TuShare 指数基础信息",
   "sync_mode": "full_replace",
   "schedule": {
     "frequency": "weekly",
@@ -29,5 +29,9 @@
       "required": false,
       "description": "Index name"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
     # TuShare settings
     TUSHARE_TOKEN: str = Field(default="")
+    TUSHARE_HTTP_URL: str = Field(default="")
     TUSHARE_RATE_LIMIT: int = Field(default=120)  # calls per minute
     TUSHARE_MAX_RETRIES: int = Field(default=3)
 
@@ -328,22 +329,26 @@ def _apply_local_dev_overrides():
 _apply_local_dev_overrides()
 
 
-# Patch TuShare to use HTTPS instead of HTTP
-# This is necessary because some proxies block HTTP POST requests but allow HTTPS
-def _patch_tushare_https():
-    """Patch TuShare client to use HTTPS URL."""
+def _patch_tushare_http_url():
+    """Patch TuShare client HTTP URL from settings."""
     try:
         import tushare.pro.client as tushare_client
 
-        if hasattr(tushare_client, "DataApi"):
-            # Change from http:// to https://
-            original_url = getattr(tushare_client.DataApi, "_DataApi__http_url", None)
-            if original_url and original_url.startswith("http://"):
-                tushare_client.DataApi._DataApi__http_url = original_url.replace(
-                    "http://", "https://", 1
-                )
+        if not hasattr(tushare_client, "DataApi"):
+            return
+
+        configured_url = settings.TUSHARE_HTTP_URL.strip()
+        if configured_url:
+            tushare_client.DataApi._DataApi__http_url = configured_url
+            return
+
+        original_url = getattr(tushare_client.DataApi, "_DataApi__http_url", None)
+        if original_url and original_url.startswith("http://"):
+            tushare_client.DataApi._DataApi__http_url = original_url.replace(
+                "http://", "https://", 1
+            )
     except Exception:
         pass
 
 
-_patch_tushare_https()
+_patch_tushare_http_url()

@@ -6,7 +6,7 @@
   "delay_between_batches": 1.0,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "Hong Kong Stock daily price data plugin using yfinance (migrated from TuShare)",
+  "description": "港股日线行情数据（使用 yfinance，从 TuShare 迁移）",
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
@@ -57,5 +57,9 @@
     "Missing field: amount (成交额) - not available from yfinance",
     "Code format: TuShare uses 5-digit codes (00700.HK), yfinance uses 4-digit codes (0700.HK)",
     "Rate limit: 60 calls/minute default to avoid API throttling"
-  ]
+  ],
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
+  }
 }

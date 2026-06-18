@@ -43,8 +43,9 @@ const handleSearch = () => {
   loadData()
 }
 
-const handlePageChange = (page: number) => {
-  currentPage.value = page
+const handlePageChange = (pageInfo: { current: number; pageSize: number }) => {
+  currentPage.value = pageInfo.current
+  pageSize.value = pageInfo.pageSize
   loadData()
 }
 
@@ -96,9 +97,9 @@ const tableColumns = computed(() => {
             current: currentPage,
             pageSize: pageSize,
             total: preview.total_count,
-            showJumper: true,
-            onChange: handlePageChange
+            showJumper: true
           }"
+          @page-change="handlePageChange"
         />
         <t-empty v-else-if="!dataStore.dataLoading" description="暂无数据" />
       </t-loading>

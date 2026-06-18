@@ -1,11 +1,18 @@
 {
   "enabled": true,
   "data_source": "tushare",
-  "available_data_sources": ["tushare", "qmt"],
+  "available_data_sources": [
+    "tushare",
+    "qmt"
+  ],
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare daily stock price data plugin",
+  "description": "TuShare A股日线行情数据",
+  "cooling": {
+    "rate_limit_seconds": 180,
+    "ip_limit_seconds": 300
+  },
   "schedule": {
     "frequency": "daily",
     "time": "18:00"

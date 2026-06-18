@@ -54,7 +54,7 @@ dev = [
 ]
 
 [project.scripts]
-stock-ds = "cli:cli"
+stock-ds = "stock_datasource.cli:cli"
 
 [build-system]
 requires = ["hatchling"]

@@ -212,6 +212,7 @@ class AuthService:
             SELECT id, email, username, password_hash, is_active, is_admin, subscription_tier, created_at, updated_at
             FROM users FINAL
             WHERE email = %(email)s AND is_active = 1
+            ORDER BY updated_at DESC
             LIMIT 1
         """
         result = self.client.execute(query, {"email": email.lower()})

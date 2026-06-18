@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import {
   apiAccessApi,
@@ -44,6 +44,13 @@ const detailEndpoint = ref<EndpointInfo | null>(null)
 // Batch selection
 const selectedPaths = ref<string[]>([])
 
+// Filter / Pagination
+type EndpointFilter = 'all' | 'enabled' | 'disabled'
+const endpointFilter = ref<EndpointFilter>('all')
+const endpointSearch = ref('')
+const endpointPage = ref(1)
+const endpointPageSize = ref(20)
+
 // ---- Computed ----
 const endpointColumns = [
   { colKey: 'row-select', type: 'multiple', width: 50 },
@@ -65,8 +72,6 @@ const usageColumns = [
   { colKey: 'total_records', title: '总记录数', width: 120, sorter: true },
 ]
 
-const enabledCount = computed(() => endpoints.value.filter(e => e.is_enabled).length)
-
 const mergedEndpoints = computed(() => {
   // Merge endpoints with policy details
   const policyMap = new Map(policies.value.map(p => [p.api_path, p]))
@@ -81,6 +86,32 @@ const mergedEndpoints = computed(() => {
       description: policy?.description || ep.description,
     }
   })
+})
+
+const enabledCount = computed(() => mergedEndpoints.value.filter(e => e.is_enabled).length)
+const disabledCount = computed(() => mergedEndpoints.value.length - enabledCount.value)
+
+const filteredEndpoints = computed(() => {
+  if (endpointFilter.value === 'enabled') return mergedEndpoints.value.filter(e => e.is_enabled)
+  if (endpointFilter.value === 'disabled') return mergedEndpoints.value.filter(e => !e.is_enabled)
+  return mergedEndpoints.value
+})
+
+const searchedEndpoints = computed(() => {
+  const q = endpointSearch.value.trim().toLowerCase()
+  if (!q) return filteredEndpoints.value
+  return filteredEndpoints.value.filter((e: any) => {
+    const apiPath = String(e.api_path ?? '').toLowerCase()
+    const pluginName = String(e.plugin_name ?? '').toLowerCase()
+    const methodName = String(e.method_name ?? '').toLowerCase()
+    const desc = String(e.description ?? '').toLowerCase()
+    return apiPath.includes(q) || pluginName.includes(q) || methodName.includes(q) || desc.includes(q)
+  })
+})
+
+const pagedEndpoints = computed(() => {
+  const start = (endpointPage.value - 1) * endpointPageSize.value
+  return searchedEndpoints.value.slice(start, start + endpointPageSize.value)
 })
 
 // ---- API calls ----
@@ -127,6 +158,21 @@ const handleSync = async () => {
     MessagePlugin.error('同步失败')
   } finally {
     syncing.value = false
+  }
+}
+
+const setEndpointFilter = (val: EndpointFilter) => {
+  endpointFilter.value = val
+}
+
+const handleEndpointPageChange = (pageInfo: any) => {
+  if (typeof pageInfo === 'number') {
+    endpointPage.value = pageInfo
+    return
+  }
+  if (pageInfo && typeof pageInfo === 'object') {
+    if (typeof pageInfo.current === 'number') endpointPage.value = pageInfo.current
+    if (typeof pageInfo.pageSize === 'number') endpointPageSize.value = pageInfo.pageSize
   }
 }
 
@@ -235,6 +281,24 @@ const daysOptions = [
   { label: '最近90天', value: 90 },
 ]
 
+watch(
+  [endpointFilter, endpointPageSize, endpointSearch],
+  () => {
+    endpointPage.value = 1
+  },
+  { flush: 'sync' },
+)
+
+watch(
+  searchedEndpoints,
+  () => {
+    const total = searchedEndpoints.value.length
+    const maxPage = Math.max(1, Math.ceil(total / endpointPageSize.value))
+    if (endpointPage.value > maxPage) endpointPage.value = maxPage
+  },
+  { flush: 'sync' },
+)
+
 onMounted(() => {
   loadData()
 })
@@ -244,16 +308,16 @@ onMounted(() => {
   <div class="api-access-view">
     <!-- Header stats bar -->
     <div class="stats-bar">
-      <div class="stat-item">
-        <span class="stat-value">{{ endpoints.length }}</span>
+      <div class="stat-item clickable" :class="{ active: endpointFilter === 'all' }" @click="setEndpointFilter('all')">
+        <span class="stat-value">{{ mergedEndpoints.length }}</span>
         <span class="stat-label">全部接口</span>
       </div>
-      <div class="stat-item">
+      <div class="stat-item clickable" :class="{ active: endpointFilter === 'enabled' }" @click="setEndpointFilter('enabled')">
         <span class="stat-value enabled-value">{{ enabledCount }}</span>
         <span class="stat-label">已开放</span>
       </div>
-      <div class="stat-item">
-        <span class="stat-value disabled-value">{{ endpoints.length - enabledCount }}</span>
+      <div class="stat-item clickable" :class="{ active: endpointFilter === 'disabled' }" @click="setEndpointFilter('disabled')">
+        <span class="stat-value disabled-value">{{ disabledCount }}</span>
         <span class="stat-label">未开放</span>
       </div>
       <div class="stat-actions">
@@ -268,6 +332,18 @@ onMounted(() => {
       <!-- Tab 1: Endpoint Management -->
       <t-tab-panel value="endpoints" label="接口管理">
         <t-card :bordered="false">
+          <div class="endpoint-toolbar">
+            <t-input
+              v-model="endpointSearch"
+              clearable
+              placeholder="搜索接口路径/插件/方法/描述"
+              style="width: 360px"
+            />
+            <span class="match-info">
+              匹配 {{ searchedEndpoints.length }} / {{ mergedEndpoints.length }}
+            </span>
+          </div>
+
           <!-- Batch actions -->
           <div class="batch-bar" v-if="selectedPaths.length > 0">
             <span class="batch-info">已选 {{ selectedPaths.length }} 个接口</span>
@@ -282,7 +358,7 @@ onMounted(() => {
           </div>
 
           <t-table
-            :data="mergedEndpoints"
+            :data="pagedEndpoints"
             :columns="endpointColumns"
             :loading="loading"
             row-key="api_path"
@@ -291,7 +367,14 @@ onMounted(() => {
             hover
             stripe
             size="medium"
-            :pagination="{ pageSize: 20 }"
+            :pagination="{
+              current: endpointPage,
+              pageSize: endpointPageSize,
+              total: searchedEndpoints.length,
+              showJumper: true,
+              showPageSize: true,
+              onChange: handleEndpointPageChange,
+            }"
           >
             <template #plugin_name="{ row }">
               <t-tag theme="primary" variant="light" size="small">{{ row.plugin_name }}</t-tag>
@@ -513,6 +596,16 @@ onMounted(() => {
   align-items: center;
 }
 
+.stat-item.clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.stat-item.clickable.active .stat-label {
+  color: #0052d9;
+  font-weight: 600;
+}
+
 .stat-value {
   font-size: 28px;
   font-weight: 700;
@@ -531,6 +624,19 @@ onMounted(() => {
 
 .stat-actions {
   margin-left: auto;
+}
+
+.endpoint-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.match-info {
+  color: #86909c;
+  font-size: 13px;
 }
 
 /* Batch bar */

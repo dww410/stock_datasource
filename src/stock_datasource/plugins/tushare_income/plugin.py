@@ -1,6 +1,7 @@
 """TuShare income statement data plugin implementation."""
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,9 @@ class TuShareIncomePlugin(BasePlugin):
         period = kwargs.get("period")
         report_type = kwargs.get("report_type")
         trade_date = kwargs.get("trade_date")  # For batch mode
+        max_stocks = kwargs.get("max_stocks")
+        shard_index = kwargs.get("shard_index")
+        shard_count = kwargs.get("shard_count")
 
         # Batch mode: extract for all stocks if ts_code not provided
         if not ts_code:
@@ -88,13 +92,26 @@ class TuShareIncomePlugin(BasePlugin):
                 self.logger.warning("No stocks found in stock_basic table")
                 return pd.DataFrame()
 
+            stock_codes = stocks_df["ts_code"].tolist()
+            if shard_count is not None:
+                if shard_index is None:
+                    shard_index = 0
+                stock_codes = [
+                    code
+                    for idx, code in enumerate(stock_codes)
+                    if idx % int(shard_count) == int(shard_index)
+                ]
+            if max_stocks is not None:
+                stock_codes = stock_codes[: int(max_stocks)]
+
             all_data = []
-            for idx, row in stocks_df.iterrows():
-                stock_code = row["ts_code"]
+            total_records = 0
+            for idx, stock_code in enumerate(stock_codes):
                 try:
-                    self.logger.info(
-                        f"Extracting income statement data for {stock_code} ({idx + 1}/{len(stocks_df)})"
-                    )
+                    # Report progress every 10 stocks
+                    if idx % 10 == 0 or idx == len(stock_codes) - 1:
+                        progress = ((idx + 1) / len(stock_codes)) * 100
+                        self.update_progress(progress, total_records)
 
                     # Use trade_date as end_date if provided, otherwise use current date
                     if trade_date:
@@ -112,10 +129,9 @@ class TuShareIncomePlugin(BasePlugin):
 
                     if not data.empty:
                         all_data.append(data)
+                        total_records += len(data)
 
                     # Rate limiting between API calls
-                    import time
-
                     time.sleep(0.1)
 
                 except Exception as e:
@@ -300,6 +316,16 @@ class TuShareIncomePlugin(BasePlugin):
         if data.empty:
             self.logger.warning("No data to load")
             return {"status": "no_data", "loaded_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_income_statement", data, date_column="end_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
 
         try:
             self.logger.info(f"Loading {len(data)} records into ods_income_statement")

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from stock_datasource.models.database import db_client
+from stock_datasource.utils.clickhouse_helpers import none_if_nan, str_or_empty, to_records
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class OpenApiService:
                 "FROM api_access_policies FINAL "
                 "ORDER BY api_path",
             )
+            records = to_records(rows)
             return [
                 {
                     "policy_id": r["policy_id"],
@@ -129,11 +131,11 @@ class OpenApiService:
                     "rate_limit_per_min": r["rate_limit_per_min"],
                     "rate_limit_per_day": r["rate_limit_per_day"],
                     "max_records": r["max_records"],
-                    "description": r["description"],
-                    "created_at": r["created_at"],
-                    "updated_at": r["updated_at"],
+                    "description": str_or_empty(r.get("description")),
+                    "created_at": none_if_nan(r.get("created_at")),
+                    "updated_at": none_if_nan(r.get("updated_at")),
                 }
-                for r in (rows or [])
+                for r in records
             ]
         except Exception as e:
             logger.error(f"Failed to get policies: {e}")
@@ -142,7 +144,14 @@ class OpenApiService:
     def get_policy(self, api_path: str) -> dict[str, Any] | None:
         """Get policy for a specific api_path (cache-first)."""
         self._refresh_cache_if_needed()
-        return self._policy_cache.get(api_path)
+        cached = self._policy_cache.get(api_path)
+        if cached is not None:
+            return cached
+
+        policy = self._query_policy_from_db(api_path)
+        if policy is not None:
+            self._policy_cache[api_path] = policy
+        return policy
 
     def upsert_policy(
         self,
@@ -180,7 +189,7 @@ class OpenApiService:
                     else existing["max_records"],
                     "description": description
                     if description is not None
-                    else existing["description"],
+                    else str_or_empty(existing.get("description")),
                     "created_at": existing["created_at"],
                     "now": now,
                 }
@@ -345,6 +354,7 @@ class OpenApiService:
                 ORDER BY total_calls DESC
             """
             rows = self.client.query(query, params)
+            records = to_records(rows)
             return [
                 {
                     "api_path": r["api_path"],
@@ -354,7 +364,7 @@ class OpenApiService:
                     "avg_response_ms": round(float(r["avg_response_ms"]), 1),
                     "total_records": r["total_records"],
                 }
-                for r in (rows or [])
+                for r in records
             ]
         except Exception as e:
             logger.error(f"Failed to get usage stats: {e}")
@@ -376,8 +386,9 @@ class OpenApiService:
                 "LIMIT 1",
                 {"api_path": api_path},
             )
-            if rows:
-                r = rows[0]
+            records = to_records(rows)
+            if records:
+                r = records[0]
                 return {
                     "policy_id": r["policy_id"],
                     "api_path": r["api_path"],
@@ -386,9 +397,9 @@ class OpenApiService:
                     "rate_limit_per_min": r["rate_limit_per_min"],
                     "rate_limit_per_day": r["rate_limit_per_day"],
                     "max_records": r["max_records"],
-                    "description": r["description"],
-                    "created_at": r["created_at"],
-                    "updated_at": r["updated_at"],
+                    "description": str_or_empty(r.get("description")),
+                    "created_at": none_if_nan(r.get("created_at")),
+                    "updated_at": none_if_nan(r.get("updated_at")),
                 }
         except Exception as e:
             logger.warning(f"Failed to query policy for {api_path}: {e}")

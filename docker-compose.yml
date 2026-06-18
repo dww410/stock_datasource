@@ -44,6 +44,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # API Keys
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      TUSHARE_HTTP_URL: ${TUSHARE_HTTP_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4}
@@ -125,6 +126,7 @@ services:
       REDIS_DB: ${REDIS_DB:-1}
       # API Keys
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      TUSHARE_HTTP_URL: ${TUSHARE_HTTP_URL:-}
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs

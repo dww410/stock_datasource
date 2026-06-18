@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare ETF基础信息 from etf_basic API",
+  "description": "TuShare ETF 基础信息（etf_basic API）",
   "sync_mode": "full_replace",
   "schedule": {
     "frequency": "weekly",
@@ -13,15 +13,26 @@
   "parameters_schema": {
     "list_status": {
       "type": "string",
-      "enum": ["L", "D", "P"],
+      "enum": [
+        "L",
+        "D",
+        "P"
+      ],
       "default": "L",
       "description": "上市状态: L上市 D退市 P待上市"
     },
     "exchange": {
       "type": "string",
-      "enum": ["SH", "SZ"],
+      "enum": [
+        "SH",
+        "SZ"
+      ],
       "required": false,
       "description": "交易所: SH上交所 SZ深交所"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

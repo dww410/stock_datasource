@@ -71,7 +71,9 @@ class IndexMonthlyExtractor:
         self._last_call_time = time.time()
 
     @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True,
     )
     def _call_api(self, api_func, **kwargs) -> pd.DataFrame:
         """Call TuShare API with rate limiting, retry and proxy."""

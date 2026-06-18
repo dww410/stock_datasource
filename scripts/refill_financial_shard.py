@@ -42,10 +42,9 @@ def main():
             "tushare_cashflow",
             "tushare_finace_indicator",
             "tushare_fina_audit",
+            "tushare_forecast",
+            "tushare_express",
         }:
-            kwargs["start_date"] = args.start_date
-            kwargs["end_date"] = args.end_date
-        elif args.plugin in {"tushare_forecast", "tushare_express"}:
             kwargs["start_date"] = args.start_date
             kwargs["end_date"] = args.end_date
 

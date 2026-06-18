@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { SyncTask } from '@/api/datamanage'
+import { getTaskStatusText, getTaskStatusTheme } from '../utils/taskStatus'
 
 const props = defineProps<{
   visible: boolean
@@ -15,28 +16,6 @@ const dialogVisible = computed({
   get: () => props.visible,
   set: (val) => emit('update:visible', val)
 })
-
-const getStatusTheme = (status: string) => {
-  const themes: Record<string, string> = {
-    pending: 'warning',
-    running: 'primary',
-    completed: 'success',
-    failed: 'danger',
-    cancelled: 'default'
-  }
-  return themes[status] || 'default'
-}
-
-const getStatusText = (status: string) => {
-  const texts: Record<string, string> = {
-    pending: '等待中',
-    running: '运行中',
-    completed: '已完成',
-    failed: '失败',
-    cancelled: '已取消'
-  }
-  return texts[status] || status
-}
 
 const getTaskTypeText = (type: string) => {
   const texts: Record<string, string> = {
@@ -105,8 +84,8 @@ const getStackTrace = (errorMessage: string) => {
           <t-tag variant="outline">{{ getTaskTypeText(task.task_type) }}</t-tag>
         </t-descriptions-item>
         <t-descriptions-item label="状态">
-          <t-tag :theme="getStatusTheme(task.status)">
-            {{ getStatusText(task.status) }}
+          <t-tag :theme="getTaskStatusTheme(task.status)">
+            {{ getTaskStatusText(task.status) }}
           </t-tag>
         </t-descriptions-item>
         <t-descriptions-item label="进度">

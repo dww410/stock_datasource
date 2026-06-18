@@ -9,6 +9,7 @@
 """
 
 import logging
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -37,10 +38,55 @@ class DataService:
     # 已知指数代码前缀（兼容不规范传入）
     _INDEX_PREFIXES = {"000001.SH", "000300.SH", "000905.SH", "399001.SZ", "399006.SZ"}
 
+    # 股票 ts_code 正则模式: 6位数字 + .SZ/.SH/.BJ
+    _TS_CODE_PATTERN = re.compile(r"^\d{6}\.(SZ|SH|BJ)$")
+
     def __init__(self):
         from ..models.database import db_client
 
         self._db = db_client
+
+    def _resolve_names_to_codes(self, symbols: list[str]) -> list[str]:
+        """将中文股票名称解析为 ts_code
+
+        对于 symbols 中不符合 ts_code 模式的项，通过 name 字段查询 dim_security 表，
+        替换为对应的 ts_code。查找失败的项保留原值。
+        """
+        resolved = []
+        names_to_lookup = []
+
+        for symbol in symbols:
+            if self._TS_CODE_PATTERN.match(symbol):
+                resolved.append(symbol)
+            else:
+                names_to_lookup.append(symbol)
+
+        if names_to_lookup:
+            names_quoted = ", ".join(f"'{n}'" for n in names_to_lookup)
+            sql = f"""
+                SELECT ts_code, name
+                FROM dim_security FINAL
+                WHERE name IN ({names_quoted})
+            """
+            try:
+                df = self._db.execute_query(sql)
+                if df is not None and not df.empty:
+                    name_to_code = dict(zip(df["name"], df["ts_code"]))
+                    for name in names_to_lookup:
+                        if name in name_to_code:
+                            resolved.append(name_to_code[name])
+                            logger.info(f"Resolved stock name '{name}' -> '{name_to_code[name]}'")
+                        else:
+                            logger.warning(f"Stock name '{name}' not found in dim_security, keeping as-is")
+                            resolved.append(name)
+                else:
+                    logger.warning(f"No dim_security results for names: {names_to_lookup}")
+                    resolved.extend(names_to_lookup)
+            except Exception as e:
+                logger.error(f"Failed to resolve stock names via dim_security: {e}")
+                resolved.extend(names_to_lookup)
+
+        return resolved
 
     def _is_index(self, symbol: str) -> bool:
         """判断代码是否为指数"""
@@ -62,21 +108,36 @@ class DataService:
         从 ClickHouse 获取历史行情数据
 
         Args:
-            symbols: 股票/指数代码列表 (如 ["000001.SZ", "000300.SH"])
+            symbols: 股票/指数代码列表 (如 ["000001.SZ", "000300.SH"])，
+                     也支持中文股票名称 (如 "光庭信息")，会自动查询 dim_security 表解析为 ts_code
             start_date: 开始日期
             end_date: 结束日期
 
         Returns:
             {symbol: DataFrame} 其中 DataFrame 包含:
             timestamp, open, high, low, close, volume, symbol
+            返回的 dict 键始终使用传入的 original_symbols（中文名称保留原样），
+            方便调用方根据传入的 symbol 查找数据
         """
         data = {}
         start_str = start_date.strftime("%Y-%m-%d") if isinstance(start_date, date) else str(start_date)
         end_str = end_date.strftime("%Y-%m-%d") if isinstance(end_date, date) else str(end_date)
 
-        # 按类型分组查询以减少 SQL 次数
-        index_symbols = [s for s in symbols if self._is_index(s)]
-        stock_symbols = [s for s in symbols if not self._is_index(s)]
+        # 保存原始 symbol 列表，用于返回时保持键名一致
+        original_symbols = list(symbols)
+
+        # 解析中文股票名称为 ts_code
+        resolved_symbols = self._resolve_names_to_codes(symbols)
+
+        # 建立 原始名称 -> ts_code 映射（仅对有变化的项）
+        symbol_to_code: dict[str, str] = {}
+        for orig, resolved in zip(original_symbols, resolved_symbols):
+            if orig != resolved:
+                symbol_to_code[orig] = resolved
+
+        # 按类型分组查询以减少 SQL 次数（使用解析后的代码）
+        index_symbols = [s for s in resolved_symbols if self._is_index(s)]
+        stock_symbols = [s for s in resolved_symbols if not self._is_index(s)]
 
         # 查询个股
         if stock_symbols:
@@ -87,6 +148,14 @@ class DataService:
         if index_symbols:
             index_data = self._query_indices(index_symbols, start_str, end_str)
             data.update(index_data)
+
+        # 如果有名称映射，将 dict 键从 ts_code 换回原始名称
+        if symbol_to_code:
+            for orig_name, ts_code in symbol_to_code.items():
+                if ts_code in data:
+                    orig_df = data.pop(ts_code).copy()
+                    orig_df["symbol"] = orig_name
+                    data[orig_name] = orig_df
 
         logger.info(
             f"Retrieved historical data for {len(data)}/{len(symbols)} symbols "
@@ -122,7 +191,7 @@ class DataService:
                 low,
                 close,
                 vol AS volume
-            FROM ods_daily
+            FROM ods_daily FINAL
             WHERE ts_code IN ({symbols_str})
               AND trade_date >= '{start_str}'
               AND trade_date <= '{end_str}'
@@ -144,7 +213,7 @@ class DataService:
                 low,
                 close,
                 vol AS volume
-            FROM ods_index_daily
+            FROM ods_index_daily FINAL
             WHERE ts_code IN ({symbols_str})
               AND trade_date >= '{start_str}'
               AND trade_date <= '{end_str}'
@@ -320,7 +389,11 @@ class IntelligentBacktestEngine:
             all_data.append(data)
 
         if not all_data:
-            raise ValueError("No historical data available")
+            missing = [s for s in config.symbols if s not in historical_data]
+            msg = "No historical data available"
+            if missing:
+                msg += f" for symbols: {', '.join(missing)}"
+            raise ValueError(msg)
 
         # 合并数据并按时间排序
         combined_data = pd.concat(all_data, ignore_index=True)

@@ -92,6 +92,11 @@ class TuShareFinaAuditPlugin(BasePlugin):
             for idx, row in stocks_df.iterrows():
                 stock_code = row["ts_code"]
                 try:
+
+                    # Report progress every 10 stocks
+                    if idx % 10 == 0 or idx == len(stocks_df) - 1:
+                        progress = ((idx + 1) / len(stocks_df)) * 100
+                        self.update_progress(progress, total_records)
                     self.logger.info(
                         f"Extracting financial audit data for {stock_code} ({idx + 1}/{len(stocks_df)})"
                     )
@@ -112,6 +117,7 @@ class TuShareFinaAuditPlugin(BasePlugin):
 
                     if not data.empty:
                         all_data.append(data)
+                        total_records += len(data)
 
                     # Rate limiting between API calls
                     import time
@@ -213,6 +219,16 @@ class TuShareFinaAuditPlugin(BasePlugin):
         if data.empty:
             self.logger.warning("No data to load")
             return {"status": "no_data", "loaded_records": 0}
+
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_fina_audit", data, date_column="end_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
 
         try:
             self.logger.info(f"Loading {len(data)} records into ods_fina_audit")

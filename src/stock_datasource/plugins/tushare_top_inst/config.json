@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare top institutional seats (机构席位) data plugin",
+  "description": "TuShare 龙虎榜机构席位数据",
   "schedule": {
     "frequency": "daily",
     "time": "19:30"
@@ -25,5 +25,9 @@
       "required": false,
       "description": "Stock code (optional, if not provided gets all stocks)"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

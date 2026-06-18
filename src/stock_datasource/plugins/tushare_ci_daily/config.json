@@ -7,5 +7,14 @@
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
+  },
+  "_comments": [
+    "rate_limit 控制的是 这个抽取器调用 TuShare API 的频率上限 （每分钟最多调用多少次），用来避免触发 TuShare 的限流/封禁。",
+    "timeout 控制的是 这个抽取器调用 TuShare API 的超时时间，默认是 30 秒。",
+    "min_points 控制的是 这个抽取器最小需要抽取的数据点数，默认是 2000。"
+  ],
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

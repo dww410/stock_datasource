@@ -139,15 +139,17 @@ async def list_skills(
     # Try to get tools from MCP server's tool manager
     try:
         from stock_datasource.services.mcp_server import create_mcp_server
-        mcp_server, tool_map = create_mcp_server()
-        for tool_name, tool_info in tool_map.items():
-            catalog.append({
-                "id": tool_name,
-                "name": tool_name,
-                "description": tool_info.get("description", "") if isinstance(tool_info, dict) else str(tool_info),
-                "category": _infer_category(tool_name),
-                "parameters_schema": {},
-            })
+        mcp_server, service_generators = create_mcp_server()
+        for service_prefix, generator in service_generators.items():
+            for tool in generator.generate_mcp_tools():
+                full_name = f"{service_prefix}_{tool['name']}"
+                catalog.append({
+                    "id": full_name,
+                    "name": full_name,
+                    "description": tool.get("description", ""),
+                    "category": _infer_category(full_name),
+                    "parameters_schema": tool.get("inputSchema", {}),
+                })
     except Exception as e:
         logger.debug("MCP server tool loading skipped: %s", e)
 

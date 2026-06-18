@@ -1,13 +1,17 @@
 {
-  "enabled": false,
+  "enabled": true,
   "rate_limit": 60,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "AKShare Hong Kong stock list from hk_stock_list API",
+  "description": "AKShare 港股股票列表（hk_stock_list API）",
   "schedule": {
     "frequency": "weekly",
     "day_of_week": "monday",
     "time": "09:00"
   },
-  "parameters_schema": {}
+  "parameters_schema": {},
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
+  }
 }

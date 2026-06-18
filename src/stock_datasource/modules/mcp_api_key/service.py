@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from stock_datasource.models.database import db_client
+from stock_datasource.utils.clickhouse_helpers import none_if_nan, to_records
 
 logger = logging.getLogger(__name__)
 
@@ -128,17 +129,18 @@ class McpApiKeyService:
                 "ORDER BY created_at DESC",
                 {"user_id": user_id},
             )
+            records = to_records(rows)
             return [
                 {
                     "id": r["id"],
                     "key_name": r["key_name"],
                     "api_key_prefix": r["api_key_prefix"],
                     "is_active": bool(r["is_active"]),
-                    "last_used_at": r["last_used_at"],
-                    "expires_at": r["expires_at"],
-                    "created_at": r["created_at"],
+                    "last_used_at": none_if_nan(r.get("last_used_at")),
+                    "expires_at": none_if_nan(r.get("expires_at")),
+                    "created_at": none_if_nan(r.get("created_at")),
                 }
-                for r in (rows or [])
+                for r in records
             ]
         except Exception as e:
             logger.error(f"Failed to list API keys: {e}")
@@ -155,10 +157,11 @@ class McpApiKeyService:
                 "WHERE id = %(key_id)s AND user_id = %(user_id)s AND is_active = 1",
                 {"key_id": key_id, "user_id": user_id},
             )
-            if not rows:
+            records = to_records(rows)
+            if not records:
                 return False, "API Key 不存在或已撤销"
 
-            row = rows[0]
+            row = records[0]
             now = datetime.now()
 
             # Insert new version with is_active=0
@@ -175,7 +178,7 @@ class McpApiKeyService:
                 "key_name": row["key_name"],
                 "api_key_hash": row["api_key_hash"],
                 "api_key_prefix": row["api_key_prefix"],
-                "expires_at": row["expires_at"],
+                "expires_at": none_if_nan(row.get("expires_at")),
                 "created_at": row["created_at"],
                 "now": now,
             }
@@ -201,6 +204,9 @@ class McpApiKeyService:
         """
         _ensure_tables()
         try:
+            raw_key = (raw_key or "").strip()
+            if raw_key.lower().startswith("bearer "):
+                raw_key = raw_key[7:].strip()
             api_key_hash = _hash_key(raw_key)
             rows = self.client.query(
                 "SELECT id, user_id, is_active, expires_at "
@@ -208,13 +214,21 @@ class McpApiKeyService:
                 "WHERE api_key_hash = %(hash)s AND is_active = 1",
                 {"hash": api_key_hash},
             )
-            if not rows:
+            records = to_records(rows)
+            if not records:
                 return False, {}, ""
 
-            row = rows[0]
+            row = records[0]
 
             # Check expiration
-            expires_at = row.get("expires_at")
+            expires_at = (
+                none_if_nan(row.get("expires_at")) if isinstance(row, dict) else None
+            )
+            if isinstance(expires_at, str):
+                try:
+                    expires_at = datetime.fromisoformat(expires_at)
+                except Exception:
+                    expires_at = None
             if expires_at and expires_at < datetime.now():
                 return False, {}, ""
 

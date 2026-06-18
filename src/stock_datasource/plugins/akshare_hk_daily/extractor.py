@@ -11,6 +11,84 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = logging.getLogger(__name__)
 
 
+OUTPUT_COLUMNS = [
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+]
+
+
+COLUMN_ALIASES = {
+    "date": "trade_date",
+    "日期": "trade_date",
+    "open": "open",
+    "开盘": "open",
+    "high": "high",
+    "最高": "high",
+    "low": "low",
+    "最低": "low",
+    "close": "close",
+    "收盘": "close",
+    "volume": "vol",
+    "成交量": "vol",
+}
+
+
+def ts_code_to_akshare(ts_code: str) -> str:
+    """Convert TuShare HK code (00700.HK) to AKShare symbol (00700)."""
+    if not ts_code:
+        return ts_code
+    return str(ts_code).split(".")[0]
+
+
+def akshare_to_ts_code(symbol: str) -> str:
+    """Convert AKShare HK symbol (00700) to TuShare HK code (00700.HK)."""
+    if not symbol:
+        return symbol
+    symbol = str(symbol)
+    if symbol.upper().endswith(".HK"):
+        return f"{symbol.rsplit('.', 1)[0]}.HK"
+    return f"{symbol}.HK"
+
+
+def map_akshare_to_tushare(df: pd.DataFrame, ts_code: str) -> pd.DataFrame:
+    """Map AKShare HK daily rows to the ods_hk_daily ts_code-style shape."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    mapped = pd.DataFrame()
+    for source_col, target_col in COLUMN_ALIASES.items():
+        if source_col in df.columns:
+            mapped[target_col] = df[source_col]
+
+    required_columns = ["trade_date", "open", "high", "low", "close", "vol"]
+    missing_columns = [col for col in required_columns if col not in mapped.columns]
+    if missing_columns:
+        raise KeyError(f"Missing AKShare HK daily columns: {missing_columns}")
+
+    mapped["ts_code"] = ts_code
+    mapped["trade_date"] = pd.to_datetime(mapped["trade_date"], errors="coerce").dt.date
+    for col in ["open", "high", "low", "close", "vol"]:
+        mapped[col] = pd.to_numeric(mapped[col], errors="coerce")
+
+    mapped = mapped.dropna(subset=["trade_date", "close"]).sort_values("trade_date")
+    mapped["pre_close"] = mapped["close"].shift(1)
+    mapped["change"] = mapped["close"] - mapped["pre_close"]
+    mapped["pct_chg"] = (mapped["change"] / mapped["pre_close"] * 100).round(2)
+    mapped["amount"] = None
+    mapped = mapped.dropna(subset=["pre_close"])
+
+    return mapped[OUTPUT_COLUMNS].reset_index(drop=True)
+
+
 class HKDailyExtractor:
     """Independent extractor for AKShare Hong Kong daily data."""
 
@@ -37,7 +115,9 @@ class HKDailyExtractor:
         self._last_call_time = time.time()
 
     @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True,
     )
     def _call_api(
         self, symbol: str, start_date: str | None = None, end_date: str | None = None
@@ -48,24 +128,28 @@ class HKDailyExtractor:
         try:
             import akshare as ak
 
-            # Build parameters - convert YYYYMMDD to YYYY-MM-DD format if needed
-            kwargs = {"symbol": symbol, "period": "daily"}
-            if start_date:
-                # Convert YYYYMMDD to YYYY-MM-DD
-                if len(start_date) == 8:
-                    start_date = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-                kwargs["start_date"] = start_date
-            if end_date:
-                # Convert YYYYMMDD to YYYY-MM-DD
-                if len(end_date) == 8:
-                    end_date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
-                kwargs["end_date"] = end_date
-
-            result = ak.stock_hk_hist(**kwargs)
+            result = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
 
             if result is None or result.empty:
                 logger.warning(f"API returned empty data for symbol {symbol}")
                 return pd.DataFrame()
+
+            if "date" in result.columns:
+                date_col = "date"
+            elif "日期" in result.columns:
+                date_col = "日期"
+            else:
+                date_col = None
+
+            if date_col and (start_date or end_date):
+                result = result.copy()
+                result[date_col] = pd.to_datetime(result[date_col], errors="coerce")
+                if start_date:
+                    start_dt = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+                    result = result[result[date_col] >= start_dt]
+                if end_date:
+                    end_dt = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+                    result = result[result[date_col] <= end_dt]
 
             logger.info(f"API call successful for {symbol}, records: {len(result)}")
             return result
@@ -87,7 +171,7 @@ class HKDailyExtractor:
         Returns:
             DataFrame with Hong Kong daily data
         """
-        return self._call_api(symbol, start_date, end_date)
+        return self._call_api(ts_code_to_akshare(symbol), start_date, end_date)
 
 
 # Global extractor instance

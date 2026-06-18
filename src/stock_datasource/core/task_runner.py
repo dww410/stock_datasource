@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from stock_datasource.core.plugin_manager import plugin_manager
 from stock_datasource.models.database import db_client
 from stock_datasource.services.metadata import metadata_service
@@ -159,51 +161,22 @@ class TaskRunner:
         }
 
         try:
-            # Ensure table exists
-            schema = plugin.get_schema()
-            table_name = schema["table_name"]
+            self.logger.info(f"Running plugin lifecycle for {plugin_name}")
+            plugin_result = plugin.run(**kwargs)
+            steps = plugin_result.get("steps", {})
+            load_step = steps.get("load", {})
+            transform_step = steps.get("transform", {})
 
-            self.logger.info(
-                f"Ensuring table {table_name} exists for plugin {plugin_name}"
-            )
-            self.schema_manager.create_table_from_schema(
-                self._schema_dict_to_object(schema)
-            )
-
-            # Extract data
-            self.logger.info(f"Extracting data with plugin {plugin_name}")
-            raw_data = plugin.extract_data(**kwargs)
-
-            if raw_data is None or len(raw_data) == 0:
-                self.logger.warning(f"No data extracted from plugin {plugin_name}")
-                result["status"] = "no_data"
-                result["records_processed"] = 0
+            if "loaded_records" in load_step:
+                records_processed = load_step["loaded_records"]
+            elif "total_records" in load_step:
+                records_processed = load_step["total_records"]
             else:
-                # Validate data
-                if plugin.validate_data(raw_data):
-                    # Transform data
-                    transformed_data = plugin.transform_data(raw_data)
+                records_processed = transform_step.get("records", 0)
 
-                    # Load data
-                    self.logger.info(
-                        f"Loading {len(transformed_data)} records into {table_name}"
-                    )
-                    self._load_data(table_name, transformed_data)
-
-                    result["data"] = transformed_data
-                    result["records_processed"] = len(transformed_data)
-                    result["status"] = "success"
-
-                    self.logger.info(
-                        f"Plugin {plugin_name} completed successfully with {len(transformed_data)} records"
-                    )
-                else:
-                    self.logger.error(
-                        f"Data validation failed for plugin {plugin_name}"
-                    )
-                    result["status"] = "validation_failed"
-                    result["records_processed"] = 0
-
+            result["status"] = plugin_result.get("status", "failed")
+            result["error"] = plugin_result.get("error")
+            result["records_processed"] = records_processed
             result["end_time"] = datetime.now()
             result["duration_seconds"] = (
                 result["end_time"] - result["start_time"]

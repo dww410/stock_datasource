@@ -43,8 +43,10 @@ def _classify_error_type(error_message: str) -> str:
     if (
         ("每分钟最多" in msg)
         or ("访问频次" in msg)
+        or ("访问频率" in msg)
         or ("频率限制" in msg)
         or ("rate limit" in msg.lower())
+        or ("超速" in msg)
     ):
         return "rate_limit"
 
@@ -75,6 +77,59 @@ def _classify_error_type(error_message: str) -> str:
         return "param_error"
 
     return "retryable"
+
+
+def _extract_cooling_seconds(error_message: str, plugin_name: str | None = None) -> int:
+    """Extract cooling time from error message and plugin config.
+
+    Args:
+        error_message: Error message text
+        plugin_name: Optional plugin name to get custom config from
+
+    Returns:
+        Cooling time in seconds, or 360 (6 minutes) as default for rate_limit errors.
+        0 if no cooling needed.
+    """
+    msg = (error_message or "").strip()
+    error_type = _classify_error_type(msg)
+
+    # Try to extract specific minutes from message first (highest priority)
+    import re
+    minutes_match = re.search(r"(\d+)\s*分钟", msg)
+    if minutes_match:
+        minutes = int(minutes_match.group(1))
+        return minutes * 60
+
+    # Try to get plugin-specific cooling config
+    if plugin_name:
+        try:
+            from stock_datasource.core.plugin_manager import plugin_manager
+
+            # Ensure plugins are discovered
+            if not plugin_manager.plugins:
+                plugin_manager.discover_plugins()
+
+            plugin = plugin_manager.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, "get_config"):
+                config = plugin.get_config()
+                cooling_config = config.get("cooling", {})
+
+                if error_type == "rate_limit" and "rate_limit_seconds" in cooling_config:
+                    return int(cooling_config["rate_limit_seconds"])
+
+                if error_type == "ip_limit" and "ip_limit_seconds" in cooling_config:
+                    return int(cooling_config["ip_limit_seconds"])
+        except Exception:
+            pass  # Fallback to defaults if plugin config unavailable
+
+    # Default values
+    if error_type == "rate_limit":
+        return 360  # 6 minutes
+
+    if error_type == "ip_limit":
+        return 600  # 10 minutes
+
+    return 0
 
 
 def _detect_plugin_param_style(plugin) -> str:
@@ -191,6 +246,10 @@ def _run_plugin_in_subprocess(
             )
             return
 
+        # Set task context for plugin progress reporting (for batch-mode plugins)
+        if hasattr(plugin, "set_task_context") and task_id:
+            plugin.set_task_context(task_id)
+
         def run_plugin(**kwargs):
             if data_source:
                 kwargs["data_source"] = data_source
@@ -213,9 +272,15 @@ def _run_plugin_in_subprocess(
                             (False, total_records, _classify_error_type(msg), msg)
                         )
                         return
-                    total_records += int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                    # Get actual records from extract step (more reliable)
+                    # Fallback to load.total_records if extract records not available
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
+                    records = int(
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
+                    total_records += records
 
                 result_queue.put((True, total_records, "", ""))
                 return
@@ -258,8 +323,12 @@ def _run_plugin_in_subprocess(
                         msg = f"{err}\n{detail}" if detail else err
                         result_queue.put((False, 0, _classify_error_type(msg), msg))
                         return
+                    # Get actual records from extract step (more reliable)
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     total_records = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                 elif param_style == "hk_daily":
                     # HK daily: use start_date + end_date for batch
@@ -275,8 +344,12 @@ def _run_plugin_in_subprocess(
                         msg = f"{err}\n{detail}" if detail else err
                         result_queue.put((False, 0, _classify_error_type(msg), msg))
                         return
+                    # Get actual records from extract step (more reliable)
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     total_records = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                 elif param_style == "month_range":
                     # ggt_monthly: use start_month + end_month
@@ -294,8 +367,12 @@ def _run_plugin_in_subprocess(
                         msg = f"{err}\n{detail}" if detail else err
                         result_queue.put((False, 0, _classify_error_type(msg), msg))
                         return
+                    # Get actual records from extract step (more reliable)
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     total_records = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                 elif param_style in ("entity_code", "skip_scheduled"):
                     # Plugins that need entity codes: cannot run full sync automatically
@@ -316,8 +393,12 @@ def _run_plugin_in_subprocess(
                         msg = f"{err}\n{detail}" if detail else err
                         result_queue.put((False, 0, "retryable", msg))
                         return
+                    # Get actual records from extract step (more reliable)
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     total_records = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                 else:
                     # Plugins using trade_date: iterate over recent trading days
@@ -345,11 +426,14 @@ def _run_plugin_in_subprocess(
                         try:
                             result = run_plugin(trade_date=dt_str)
                             if result.get("status") == "success":
-                                total_records += int(
-                                    result.get("steps", {})
-                                    .get("load", {})
-                                    .get("total_records", 0)
+                                # Get actual records from extract step (more reliable)
+                                load_step = result.get("steps", {}).get("load", {})
+                                extract_step = result.get("steps", {}).get("extract", {})
+                                records = int(
+                                    extract_step.get("records")
+                                    or load_step.get("total_records", 0)
                                 )
+                                total_records += records
                         except Exception as e:
                             failed_dates += 1
                             logger.warning(
@@ -432,8 +516,12 @@ def _run_plugin_in_subprocess(
                 result_queue.put((False, 0, _classify_error_type(msg), msg))
                 return
 
+            # Get actual records from extract step (more reliable)
+            load_step = result.get("steps", {}).get("load", {})
+            extract_step = result.get("steps", {}).get("extract", {})
             records = int(
-                result.get("steps", {}).get("load", {}).get("total_records", 0)
+                extract_step.get("records")
+                or load_step.get("total_records", 0)
             )
             result_queue.put((True, records, "", ""))
     except Exception as e:
@@ -655,6 +743,28 @@ class TaskWorker:
 
             # Failed
             next_attempt = attempt + 1
+            if error_type in {"rate_limit", "ip_limit"}:
+                # Special handling for cooling errors: keep task alive during cooling
+                plugin_name = task_data.get("plugin_name")
+                cooling_seconds = self._compute_cooling_seconds(
+                    error_type, error_msg, plugin_name
+                )
+                logger.warning(
+                    f"Worker {self.worker_id}: Task {task_id} ({plugin_name}) hit {error_type}, "
+                    f"cooling down for {cooling_seconds}s (attempt {next_attempt}/{max_attempts})"
+                )
+                # Schedule retry with cooling time
+                self._schedule_cooling_retry(
+                    task_data=task_data,
+                    next_attempt=next_attempt,
+                    cooling_seconds=cooling_seconds,
+                    last_error_type=error_type,
+                    error_message=error_msg,
+                )
+                if execution_id:
+                    task_queue.update_execution_stats(execution_id)
+                return
+
             if self._is_retryable_error(error_type) and next_attempt < max_attempts:
                 delay_seconds = self._compute_backoff_seconds(next_attempt)
                 logger.warning(
@@ -704,13 +814,12 @@ class TaskWorker:
         if error_type in {
             "plugin_not_found",
             "config_error",
-            "ip_limit",
-            "rate_limit",
             "param_error",
             "schema_error",
             "api_error",
         }:
             return False
+        # rate_limit and ip_limit are retryable with cooling time
         return True
 
     def _compute_backoff_seconds(self, attempt: int) -> int:
@@ -718,6 +827,34 @@ class TaskWorker:
         base = min(2**attempt, 60)
         jitter = int(time.time()) % 3
         return base + jitter
+
+    def _compute_cooling_seconds(
+        self, error_type: str, error_message: str, plugin_name: str | None = None
+    ) -> int:
+        """Compute cooling time for rate limit / IP limit errors.
+
+        Args:
+            error_type: Type of error
+            error_message: Error message text
+            plugin_name: Optional plugin name to get custom config from
+
+        Returns:
+            Cooling time in seconds
+        """
+        # Try to extract from message and plugin config first
+        cooling_seconds = _extract_cooling_seconds(error_message, plugin_name)
+        if cooling_seconds > 0:
+            return cooling_seconds
+
+        # Default values
+        if error_type == "rate_limit":
+            return 360  # 6 minutes
+
+        if error_type == "ip_limit":
+            return 600  # 10 minutes
+
+        # Regular backoff
+        return self._compute_backoff_seconds(1)
 
     def _schedule_retry(
         self,
@@ -757,6 +894,61 @@ class TaskWorker:
         queue_key = task_queue.QUEUE_KEY.format(priority=priority)
         redis.lpush(queue_key, task_id)
 
+    def _schedule_cooling_retry(
+        self,
+        task_data: dict,
+        next_attempt: int,
+        cooling_seconds: int,
+        last_error_type: str,
+        error_message: str,
+    ) -> None:
+        """Schedule task retry with cooling state.
+
+        Unlike regular retry, cooling tasks:
+        1. Stay in 'cooling_down' status during wait
+        2. Have longer wait times
+        3. Don't consume max_attempts for cooling-only errors
+
+        Args:
+            task_data: Task data
+            next_attempt: Next attempt number
+            cooling_seconds: Seconds to wait before retry
+            last_error_type: Type of error
+            error_message: Error message
+        """
+        from stock_datasource.services.task_queue import RedisUnavailableError
+
+        task_id = task_data.get("task_id")
+        priority = int(task_data.get("priority", TaskPriority.NORMAL.value))
+
+        try:
+            redis = task_queue._get_redis()
+        except RedisUnavailableError:
+            return
+
+        now = datetime.now()
+        next_run_at = (now + timedelta(seconds=cooling_seconds)).isoformat()
+
+        # Set status to 'cooling_down' so frontend can display proper status
+        redis.hset(
+            task_queue.TASK_KEY.format(task_id=task_id),
+            mapping={
+                "status": "cooling_down",
+                "attempt": next_attempt,
+                "next_run_at": next_run_at,
+                "last_error_type": last_error_type,
+                "error_message": error_message[:2000],
+                "cooling_until": next_run_at,
+                "cooling_seconds": str(cooling_seconds),
+                "updated_at": now.isoformat(),
+                "started_at": "",
+                "completed_at": "",
+            },
+        )
+
+        queue_key = task_queue.QUEUE_KEY.format(priority=priority)
+        redis.lpush(queue_key, task_id)
+
     def _mark_failed_exhausted(
         self,
         task_id: str,
@@ -786,6 +978,19 @@ class TaskWorker:
             },
         )
         redis.srem(task_queue.RUNNING_KEY, task_id)
+
+        # Also persist failure status to ClickHouse for history and fallback
+        try:
+            from stock_datasource.modules.datamanage.service import sync_task_manager
+
+            task_data = task_queue.get_task(task_id)
+            if task_data:
+                sync_task = sync_task_manager._task_data_to_sync_task(task_data)
+                sync_task_manager._save_task_to_db(sync_task)
+        except Exception as e:
+            logger.warning(
+                f"Worker {self.worker_id}: Failed to persist task {task_id} failure to DB: {e}"
+            )
 
     def _run_task_with_timeout(
         self, task_data: dict, timeout_seconds: int
@@ -852,7 +1057,14 @@ class TaskWorker:
                 f"{error_msg}\n{error_detail}" if error_detail else error_msg
             )
 
-        records = int(result.get("steps", {}).get("load", {}).get("total_records", 0))
+        # Get actual records from extract step (more reliable)
+        # Fallback to load.total_records if extract records not available
+        load_step = result.get("steps", {}).get("load", {})
+        extract_step = result.get("steps", {}).get("extract", {})
+        records = int(
+            extract_step.get("records")
+            or load_step.get("total_records", 0)
+        )
         task_queue.update_progress(task_id, 100, records)
 
         return records
@@ -887,8 +1099,13 @@ class TaskWorker:
                 result = plugin.run(trade_date=date_for_api)
 
                 if result.get("status") == "success":
+                    # Get actual records from extract step (more reliable)
+                    # Fallback to load.total_records if extract records not available
+                    load_step = result.get("steps", {}).get("load", {})
+                    extract_step = result.get("steps", {}).get("extract", {})
                     records = int(
-                        result.get("steps", {}).get("load", {}).get("total_records", 0)
+                        extract_step.get("records")
+                        or load_step.get("total_records", 0)
                     )
                     total_records += records
                 else:

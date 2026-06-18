@@ -75,13 +75,17 @@ class ScheduleService:
                 execution_id = record.get("execution_id")
                 task_ids = record.get("task_ids", [])
 
-                # Check if there are actually unfinished tasks
-                has_unfinished = False
+                # Check if there are actually unfinished (stale) tasks
+                has_stale_tasks = False
                 completed = 0
                 failed = 0
+                tasks_to_fail = []
 
                 for task_id in task_ids:
+                    # Try Redis first, then fallback to ClickHouse history
                     task = sync_task_manager.get_task(task_id)
+                    if not task:
+                        task = sync_task_manager.get_task_from_history(task_id)
                     if task:
                         status_val = (
                             task.status.value
@@ -92,11 +96,29 @@ class ScheduleService:
                             completed += 1
                         elif status_val == "failed":
                             failed += 1
-                        elif status_val in ("pending", "running"):
-                            has_unfinished = True
+                        elif status_val == "pending":
+                            # Pending tasks are definitely stale
+                            has_stale_tasks = True
+                            tasks_to_fail.append((task_id, "pending"))
+                        elif status_val == "running":
+                            # Verify it's actually stuck - check progress hasn't advanced
+                            if task.updated_at and task.started_at:
+                                elapsed = (
+                                    datetime.now() - task.updated_at
+                                ).total_seconds()
+                                # Only consider stale if no progress in last 10 seconds
+                                if elapsed < 10:
+                                    logger.info(
+                                        f"Task {task_id} still making progress "
+                                        f"(updated {elapsed:.1f}s ago), keeping as running"
+                                    )
+                                    continue
+                            # This running task is stale
+                            has_stale_tasks = True
+                            tasks_to_fail.append((task_id, "running"))
 
-                if has_unfinished:
-                    # Has unfinished tasks - mark as interrupted
+                if has_stale_tasks:
+                    # Has stale unfinished tasks - mark as interrupted
                     update_schedule_execution(
                         execution_id,
                         {
@@ -112,28 +134,20 @@ class ScheduleService:
                         f"Marked execution {execution_id} as interrupted due to service restart"
                     )
 
-                    # Also mark stale pending/running tasks so they won't be picked
-                    # up by workers. They can be retried via retry_execution.
-                    for task_id in task_ids:
-                        task = sync_task_manager.get_task(task_id)
-                        if task:
-                            ts = (
-                                task.status.value
-                                if hasattr(task.status, "value")
-                                else str(task.status)
+                    # Mark stale tasks as failed/cancelled
+                    for task_id, task_state in tasks_to_fail:
+                        if task_state == "pending":
+                            sync_task_manager.cancel_task(task_id)
+                            logger.info(
+                                f"Cancelled stale pending task {task_id} in interrupted execution {execution_id}"
                             )
-                            if ts == "pending":
-                                sync_task_manager.cancel_task(task_id)
-                                logger.info(
-                                    f"Cancelled stale pending task {task_id} in interrupted execution {execution_id}"
-                                )
-                            elif ts == "running":
-                                task_queue.fail_task(
-                                    task_id, "Task interrupted by service restart"
-                                )
-                                logger.info(
-                                    f"Failed stale running task {task_id} in interrupted execution {execution_id}"
-                                )
+                        else:  # running
+                            task_queue.fail_task(
+                                task_id, "Task interrupted by service restart"
+                            )
+                            logger.info(
+                                f"Failed stale running task {task_id} in interrupted execution {execution_id}"
+                            )
                 else:
                     # All tasks finished - update to final status
                     final_status = "failed" if failed > 0 else "completed"
@@ -152,6 +166,52 @@ class ScheduleService:
 
         if interrupted_count > 0:
             logger.info(f"Marked {interrupted_count} executions as interrupted")
+
+    def update_execution_on_task_complete(self, task_id: str, status: str) -> None:
+        """Update execution record when a task completes.
+
+        Updates completed_plugins and failed_plugins counts, and sets the
+        final execution status if all tasks have finished.
+
+        Args:
+            task_id: The task that completed
+            status: Task status ("completed" or "failed")
+        """
+        history = get_schedule_history(limit=100)
+
+        for record in history:
+            if record.get("status") == "running" and task_id in record.get("task_ids", []):
+                execution_id = record.get("execution_id")
+                completed = record.get("completed_plugins", 0)
+                failed = record.get("failed_plugins", 0)
+                total = record.get("total_plugins", 0)
+
+                # Update counters
+                if status == "completed":
+                    completed += 1
+                elif status == "failed":
+                    failed += 1
+
+                # Check if all tasks are done
+                all_done = (completed + failed) >= total
+                final_status = "running"
+                if all_done:
+                    final_status = "failed" if failed > 0 else "completed"
+
+                update_schedule_execution(
+                    execution_id,
+                    {
+                        "completed_plugins": completed,
+                        "failed_plugins": failed,
+                        "status": final_status,
+                        "completed_at": datetime.now().isoformat() if all_done else None,
+                    },
+                )
+                logger.info(
+                    f"Updated execution {execution_id}: completed={completed}, "
+                    f"failed={failed}, total={total}, status={final_status}"
+                )
+                return
 
     # ============ Global Schedule Config ============
 
@@ -599,7 +659,15 @@ class ScheduleService:
 
             # Determine task type and trade_dates based on smart backfill
             task_type = TaskType.INCREMENTAL
-            trade_dates = None
+            # For INCREMENTAL tasks, always save latest trading date to trade_dates
+            # so frontend can display it; actual execution still uses _get_latest_trading_date
+            from stock_datasource.core.trade_calendar import get_trade_calendar
+            calendar = get_trade_calendar()
+            latest_days = calendar.get_trading_days(n=1, market="cn")
+            if latest_days:
+                trade_dates = [latest_days[-1].strftime("%Y%m%d")]
+            else:
+                trade_dates = None
 
             if plugin_cfg and plugin_cfg.get("full_scan_enabled"):
                 task_type = TaskType.FULL
@@ -679,18 +747,22 @@ class ScheduleService:
             limit=limit * 2
         )  # Get more to allow for filtering
 
-        # 收集需要更新的 running 状态记录的 execution_id
-        running_ids = [
+        # 收集需要重新评估状态的 execution_id：
+        # - running/stopping: 任务可能已完成，需推进到 completed/failed
+        # - interrupted: 服务重启时标记的中断，但任务可能后来实际完成了，
+        #   需根据任务真实状态修正（否则列表显示 interrupted 而详情显示 completed）
+        reeval_ids = [
             record.get("execution_id")
             for record in history
-            if record.get("status") == "running" and record.get("execution_id")
+            if record.get("status") in ("running", "stopping", "interrupted")
+            and record.get("execution_id")
         ]
 
-        # 只有当存在 running 状态的记录时才进行状态更新
-        if running_ids:
-            # 批量更新 running 状态记录（最多更新前5个，避免超时）
+        # 只有当存在需要重新评估的记录时才进行状态更新
+        if reeval_ids:
+            # 批量更新（最多更新前5个，避免超时）
             # 传入 cached_history 避免重复读取文件
-            for execution_id in running_ids[:5]:
+            for execution_id in reeval_ids[:5]:
                 self.update_execution_status(execution_id, cached_history=history)
 
             # 只有更新过状态才重新获取历史
@@ -769,14 +841,19 @@ class ScheduleService:
         tasks_to_retry = []
         is_interrupted = status == "interrupted"
 
+        all_tasks = []
         for tid in original_task_ids:
+            # First try Redis, then fallback to ClickHouse history
             task = sync_task_manager.get_task(tid)
+            if not task:
+                task = sync_task_manager.get_task_from_history(tid)
             if task:
                 status_val = (
                     task.status.value
                     if hasattr(task.status, "value")
                     else str(task.status)
                 )
+                all_tasks.append((task, status_val))
                 if is_interrupted:
                     # Interrupted execution: retry failed, cancelled, AND stale pending/running tasks
                     if status_val in ("failed", "cancelled", "pending", "running"):
@@ -786,11 +863,25 @@ class ScheduleService:
                     if status_val in ("failed", "cancelled"):
                         tasks_to_retry.append(task)
 
+        # Edge case: execution is "interrupted" but all tasks are "completed"
+        # This happens when service restarts after all tasks finished but before
+        # the execution status was updated. User explicitly clicked "retry" to
+        # re-run the sync (e.g., data might be incomplete), so retry all tasks.
+        if not tasks_to_retry and is_interrupted and len(all_tasks) > 0:
+            all_completed = all(status == "completed" for _, status in all_tasks)
+            if all_completed:
+                logger.warning(
+                    f"Execution {execution_id} is interrupted but all {len(all_tasks)} "
+                    f"tasks are completed. Retrying all tasks anyway due to explicit user request."
+                )
+                tasks_to_retry = [task for task, _ in all_tasks]
+
         if not tasks_to_retry:
             msg = (
                 f"No retriable tasks found in execution {execution_id}. "
                 f"Execution status: {status}, task statuses checked: failed/cancelled"
                 + ("/pending/running" if is_interrupted else "")
+                + (f" (all {len(all_tasks)} tasks are completed)" if is_interrupted and len(all_tasks) > 0 else "")
             )
             logger.error(msg)
             raise ValueError(msg)
@@ -861,6 +952,11 @@ class ScheduleService:
     ) -> dict[str, Any] | None:
         """Update execution status by checking task statuses.
 
+        Re-evaluates running/stopping/interrupted executions. For interrupted
+        records (marked on service restart), if all tasks are now actually
+        finished, the status is corrected to completed/failed so the list view
+        matches the detail view.
+
         Args:
             execution_id: The execution ID to update
             cached_history: Optional pre-fetched history to avoid repeated file reads
@@ -879,7 +975,13 @@ class ScheduleService:
                 record = r
                 break
 
-        if not record or record.get("status") not in ("running", "stopping"):
+        # Re-evaluate running/stopping (in-flight) and interrupted (stale-marked).
+        # Skip already-final statuses (completed/failed/cancelled/stopped/skipped).
+        if not record or record.get("status") not in (
+            "running",
+            "stopping",
+            "interrupted",
+        ):
             return record
 
         task_ids = record.get("task_ids", [])
@@ -889,7 +991,8 @@ class ScheduleService:
             update_schedule_execution(execution_id, record)
             return record
 
-        # Check task statuses
+        # Check task statuses — try Redis first, fall back to ClickHouse history
+        # so completed tasks that have aged out of Redis still count.
         completed = 0
         failed = 0
         cancelled = 0
@@ -897,6 +1000,8 @@ class ScheduleService:
 
         for task_id in task_ids:
             task = sync_task_manager.get_task(task_id)
+            if not task:
+                task = sync_task_manager.get_task_from_history(task_id)
             if task:
                 status_val = (
                     task.status.value
@@ -915,9 +1020,10 @@ class ScheduleService:
         record["completed_plugins"] = completed
         record["failed_plugins"] = failed
 
+        prev_status = record.get("status")
         if running == 0:
             # All tasks finished - determine final status
-            if record.get("status") == "stopping":
+            if prev_status == "stopping":
                 # Was manually stopped
                 record["status"] = "stopped"
             elif failed > 0:
@@ -925,6 +1031,10 @@ class ScheduleService:
             else:
                 record["status"] = "completed"
             record["completed_at"] = datetime.now().isoformat()
+        elif prev_status == "interrupted":
+            # Still has running/pending tasks but was marked interrupted —
+            # keep interrupted status, don't silently flip back to running.
+            pass
 
         update_schedule_execution(execution_id, record)
         return record
@@ -1056,6 +1166,9 @@ class ScheduleService:
 
         for task_id in task_ids:
             task = sync_task_manager.get_task(task_id)
+            if not task:
+                # Fall back to ClickHouse history for tasks aged out of Redis
+                task = sync_task_manager.get_task_from_history(task_id)
             if task:
                 task_detail = {
                     "task_id": task.task_id,

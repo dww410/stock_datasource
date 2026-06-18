@@ -105,6 +105,12 @@ const schemaColumns = [
               <t-descriptions-item label="速率限制">{{ detail.config.rate_limit }} 次/分钟</t-descriptions-item>
               <t-descriptions-item label="超时时间">{{ detail.config.timeout }} 秒</t-descriptions-item>
               <t-descriptions-item label="重试次数">{{ detail.config.retry_attempts }} 次</t-descriptions-item>
+              <t-descriptions-item label="频率限制冷却">
+                {{ detail.config.cooling?.rate_limit_seconds || 360 }} 秒
+              </t-descriptions-item>
+              <t-descriptions-item label="IP限制冷却">
+                {{ detail.config.cooling?.ip_limit_seconds || 600 }} 秒
+              </t-descriptions-item>
               <t-descriptions-item v-if="showDataSourceConfig" label="默认数据源" :span="2">
                 <t-space>
                   <t-select v-model="selectedDataSource" :options="dataSourceOptions" style="width: 180px" />

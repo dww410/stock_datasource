@@ -81,8 +81,7 @@ class RtKExtractor:
 
             self._last_call_time = time.time()
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    @retry(        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     def _call_api(self, ts_code: str) -> pd.DataFrame:
         """Call TuShare API with rate limiting and retry."""

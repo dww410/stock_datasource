@@ -11,210 +11,217 @@ def get_all_routers() -> list:
         from .auth.router import router as auth_router
 
         routers.append(("/auth", auth_router, ["用户认证"]))
-    except ImportError:
+    except Exception:
+        pass
+
+    try:
+        from .mcp_api_key.router import router as mcp_api_key_router
+
+        routers.append(("/mcp-api-key", mcp_api_key_router, ["API Key"]))
+    except Exception:
         pass
 
     try:
         from .chat.router import router as chat_router
 
         routers.append(("/chat", chat_router, ["对话交互"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .market.router import router as market_router
 
         routers.append(("/market", market_router, ["行情分析"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .screener.router import router as screener_router
 
         routers.append(("/screener", screener_router, ["智能选股"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .report.router import router as report_router
 
         routers.append(("/report", report_router, ["财报研读"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .memory.router import router as memory_router
 
         routers.append(("/memory", memory_router, ["用户记忆"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .datamanage.router import router as datamanage_router
 
         routers.append(("/datamanage", datamanage_router, ["数据管理"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .portfolio.router import router as portfolio_router
 
         routers.append(("/portfolio", portfolio_router, ["持仓管理"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .profile.router import router as profile_router
 
         routers.append(("/portfolio", profile_router, ["账户配置"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .backtest.router import router as backtest_router
 
         routers.append(("/backtest", backtest_router, ["策略回测"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .index.router import router as index_router
 
         routers.append(("/index", index_router, ["指数选股"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .etf.router import router as etf_router
 
         routers.append(("/etf", etf_router, ["ETF基金"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .overview.router import router as overview_router
 
         routers.append(("/overview", overview_router, ["市场概览"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .ths_index.router import router as ths_index_router
 
         routers.append(("/ths-index", ths_index_router, ["板块指数"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .news.router import router as news_router
 
         routers.append(("/news", news_router, ["新闻资讯"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .arena.router import router as arena_router
 
         routers.append(("/arena", arena_router, ["多Agent竞技场"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .hk_report.router import router as hk_report_router
 
         routers.append(("/hk-report", hk_report_router, ["港股财报"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .quant.router import router as quant_router
 
         routers.append(("/quant", quant_router, ["量化选股"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .realtime_minute.router import router as realtime_minute_router
 
         routers.append(("/realtime", realtime_minute_router, ["实时分钟"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .token_usage.router import router as token_usage_router
 
         routers.append(("/token", token_usage_router, ["Token用量"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .mcp_usage.router import router as mcp_usage_router
 
         routers.append(("/mcp-usage", mcp_usage_router, ["MCP调用统计"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .financial_analysis.router import router as financial_analysis_router
 
         routers.append(("/financial-analysis", financial_analysis_router, ["财务分析"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .wechat_bridge.router import router as wechat_bridge_router
 
         routers.append(("/wechat-bridge", wechat_bridge_router, ["微信联动"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .signal_aggregator.router import router as signal_aggregator_router
 
         routers.append(("/signal-aggregator", signal_aggregator_router, ["信号聚合"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .akinator.router import router as akinator_router
 
         routers.append(("/akinator", akinator_router, ["猜你所想"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .sentinel.router import router as sentinel_router
 
         routers.append(("/sentinel", sentinel_router, ["哨兵选股"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .agent_management.router import router as agent_mgmt_router
 
         routers.append(("/agents", agent_mgmt_router, ["Agent管理"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .orchestration.router import router as orchestration_router
 
         routers.append(("/orchestrations", orchestration_router, ["Agent编排"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .paper_trading.router import router as paper_trading_router
 
         routers.append(("/paper-trading", paper_trading_router, ["模拟盘"]))
-    except ImportError:
+    except Exception:
         pass
 
     try:
         from .timing.router import router as timing_router
 
         routers.append(("/timing", timing_router, ["择时系统"]))
-    except ImportError:
+    except Exception:
         pass
 
     return routers

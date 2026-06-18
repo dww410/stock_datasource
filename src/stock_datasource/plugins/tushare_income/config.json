@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare income statement data plugin",
+  "description": "TuShare 利润表数据",
   "schedule": {
     "frequency": "monthly",
     "time": "19:00"
@@ -36,5 +36,9 @@
       "required": false,
       "description": "Report type: 1=合并报表, 2=单季合并, 4=调整合并报表, 6=母公司报表"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

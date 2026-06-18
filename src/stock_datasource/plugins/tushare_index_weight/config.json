@@ -3,7 +3,7 @@
   "rate_limit": 30,
   "timeout": 60,
   "retry_attempts": 3,
-  "description": "TuShare index weight plugin (constituent stocks and weights)",
+  "description": "TuShare 指数权重数据（成分股及权重）",
   "schedule": {
     "frequency": "monthly",
     "day_of_month": 1,
@@ -37,5 +37,9 @@
       "required": false,
       "description": "Trade date in YYYYMMDD format"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

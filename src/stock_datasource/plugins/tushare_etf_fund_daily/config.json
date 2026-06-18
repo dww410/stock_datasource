@@ -3,7 +3,7 @@
   "rate_limit": 30,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare ETF日线行情 from fund_daily API",
+  "description": "TuShare ETF 日线行情（fund_daily API）",
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
@@ -32,5 +32,9 @@
       "required": false,
       "description": "结束日期 YYYYMMDD格式"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

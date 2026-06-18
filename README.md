@@ -167,10 +167,10 @@
 uv run cli.py load-hk-basic
 
 # 2. 获取所有港股最近一年的历史日线数据
-uv run scripts/fetch_hk_daily_from_akshare.py
+uv run cli.py run-plugin akshare_hk_daily
 
 # 3. 测试模式（仅获取前10只股票）
-uv run scripts/fetch_hk_daily_from_akshare.py --max-stocks 10
+uv run cli.py run-plugin akshare_hk_daily -p max_stocks=10
 ```
 
 #### 数据更新
@@ -179,9 +179,9 @@ uv run scripts/fetch_hk_daily_from_akshare.py --max-stocks 10
 
 ```bash
 # 更新最近3天的数据
-uv run scripts/fetch_hk_daily_from_akshare.py \
-  --start-date $(date -d "3 days ago" +%Y%m%d) \
-  --end-date $(date +%Y%m%d)
+uv run cli.py run-plugin akshare_hk_daily \
+  -p start_date=$(date -d "3 days ago" +%Y%m%d) \
+  -p end_date=$(date +%Y%m%d)
 ```
 
 #### 数据统计

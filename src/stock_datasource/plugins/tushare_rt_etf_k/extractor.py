@@ -41,8 +41,7 @@ class RtEtfKExtractor:
                 time.sleep(self._min_interval - elapsed)
             self._last_call_time = time.time()
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    @retry(        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     def extract(self, ts_code: str, topic: str | None = None) -> pd.DataFrame:
         self._rate_limit()

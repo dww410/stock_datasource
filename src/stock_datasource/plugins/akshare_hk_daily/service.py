@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from stock_datasource.core.base_service import BaseService, QueryParam, query_method
+from stock_datasource.plugins.akshare_hk_daily.extractor import akshare_to_ts_code
 
 
 def _convert_to_json_serializable(obj: Any) -> Any:
@@ -12,10 +13,7 @@ def _convert_to_json_serializable(obj: Any) -> Any:
     if isinstance(obj, pd.Timestamp):
         return obj.strftime("%Y%m%d")
     elif isinstance(obj, (pd.Series, dict)):
-        return {
-            k: _convert_to_json_serializable(v)
-            for k, v in (obj.items() if isinstance(obj, dict) else obj.items())
-        }
+        return {k: _convert_to_json_serializable(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_convert_to_json_serializable(item) for item in obj]
     elif pd.isna(obj):
@@ -66,18 +64,22 @@ class AKShareHKDailyService(BaseService):
         Returns:
             List of daily data records
         """
+        ts_code = akshare_to_ts_code(symbol)
         query = f"""
-        SELECT 
-            symbol,
+        SELECT
+            ts_code,
             trade_date,
             open,
             high,
             low,
             close,
-            volume,
+            pre_close,
+            change,
+            pct_chg,
+            vol,
             amount
         FROM ods_hk_daily
-        WHERE symbol = '{symbol}'
+        WHERE ts_code = '{ts_code}'
         """
 
         if start_date:
@@ -118,18 +120,22 @@ class AKShareHKDailyService(BaseService):
         Returns:
             List of latest daily data records
         """
+        ts_code = akshare_to_ts_code(symbol)
         query = f"""
-        SELECT 
-            symbol,
+        SELECT
+            ts_code,
             trade_date,
             open,
             high,
             low,
             close,
-            volume,
+            pre_close,
+            change,
+            pct_chg,
+            vol,
             amount
         FROM ods_hk_daily
-        WHERE symbol = '{symbol}'
+        WHERE ts_code = '{ts_code}'
         ORDER BY trade_date DESC
         LIMIT {limit}
         """

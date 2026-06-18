@@ -273,6 +273,61 @@ class TradeCalendarService:
             self.logger.error(f"Failed to get trading days: {e}")
             return []
 
+    def get_trading_periods(
+        self,
+        n: int,
+        frequency: str,
+        end_date: str | date | datetime | None = None,
+        market: str = MARKET_CN,
+    ) -> list[str]:
+        """Get the last trading day of each period (week/month) for the last n periods.
+
+        Used for checking missing data on weekly/monthly frequency tables — the
+        trade_date in such tables is typically the last trading day of the period.
+
+        Args:
+            n: Number of periods to retrieve
+            frequency: 'weekly' or 'monthly' (other values fall back to daily)
+            end_date: End date (default: today)
+            market: Market type
+
+        Returns:
+            List of period-end trading dates in YYYY-MM-DD format, sorted
+            descending (most recent first). Length <= n.
+        """
+        if frequency not in ("weekly", "monthly"):
+            return self.get_trading_days(n, end_date=end_date, market=market)
+
+        # Fetch enough trading days to cover n periods with buffer.
+        if frequency == "weekly":
+            days_needed = n * 7 + 10
+        else:  # monthly
+            days_needed = n * 31 + 10
+
+        all_days = self.get_trading_days(days_needed, end_date=end_date, market=market)
+        if not all_days:
+            return []
+
+        try:
+            dates = pd.to_datetime(all_days)
+            if frequency == "weekly":
+                iso = dates.isocalendar()
+                keys = [f"{y}-{w:02d}" for y, w in zip(iso["year"], iso["week"])]
+            else:  # monthly
+                keys = dates.strftime("%Y-%m").tolist()
+
+            # all_days is descending, so first occurrence per key is the latest
+            # trading day in that period.
+            seen: dict[str, str] = {}
+            for d, k in zip(all_days, keys):
+                if k not in seen:
+                    seen[k] = d
+
+            return list(seen.values())[:n]
+        except Exception as e:
+            self.logger.error(f"Failed to get trading periods ({frequency}): {e}")
+            return []
+
     def is_trading_day(
         self, date_input: str | date | datetime, market: str = MARKET_CN
     ) -> bool:

@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare stock limit data plugin",
+  "description": "TuShare 涨跌停价格数据",
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
@@ -15,5 +15,9 @@
       "required": true,
       "description": "Trade date in YYYYMMDD format"
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

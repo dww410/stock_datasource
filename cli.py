@@ -948,6 +948,434 @@ def task_info(task_id):
 
 
 # ============================================================
+# TuShare Data Management Commands
+# ============================================================
+
+@cli.group()
+def tushare():
+    """TuShare data management and synchronization commands."""
+    pass
+
+
+@tushare.command('audit')
+@click.option('--years', default=3, type=int, help='Years of recent data to audit (default: 3)')
+@click.option('--format', 'output_format', default='table', type=click.Choice(['table', 'json']),
+              help='Output format (default: table)')
+@click.option('--output', '-o', type=str, help='Save audit results to file')
+@click.option('--list-empty', is_flag=True, help='List ALL empty tables in the database')
+@click.option('--check-dates', is_flag=True, help='Show latest data dates for key tables')
+def tushare_audit(years, output_format, output, list_empty, check_dates):
+    """Audit TuShare data coverage and completeness.
+
+    Replacement for old check_empty.py/check_dates.py scripts."""
+
+    try:
+        from stock_datasource.services.tushare_audit import get_tushare_audit
+
+        audit = get_tushare_audit()
+
+        # --list-empty mode
+        if list_empty:
+            click.echo("Listing ALL empty tables...")
+            empty = audit.get_all_empty_tables()
+
+            if not empty:
+                click.echo("✓ No empty tables found!")
+                return
+
+            click.echo(f"\nFound {len(empty)} empty tables:\n")
+            click.echo(f"{'Table Name':<35} {'Engine':<15} {'Plugin?':<8}")
+            click.echo("─" * 60)
+
+            for t in empty:
+                plugin_mark = "✓" if t["is_plugin_table"] else "✗"
+                click.echo(f"{t['table_name']:<35} {t['engine']:<15} {plugin_mark:<8}")
+
+            click.echo(f"\nTotal: {len(empty)} empty tables")
+            click.echo(f"  With plugin: {sum(1 for t in empty if t['is_plugin_table'])}")
+            click.echo(f"  Without plugin: {sum(1 for t in empty if not t['is_plugin_table'])}")
+            return
+
+        # --check-dates mode
+        if check_dates:
+            click.echo("Checking latest data dates...")
+            dates = audit.get_latest_dates()
+
+            click.echo(f"\nLatest trading calendar date: {dates.get('calendar_latest', 'N/A')}")
+            click.echo(f"\nKey table status:")
+            click.echo(f"{'Table':<25} {'Latest Date':<12}")
+            click.echo("─" * 40)
+
+            for td in dates.get("table_dates", []):
+                if td.get("error"):
+                    click.echo(f"{td['table']:<25} ERROR: {td['error'][:30]}")
+                else:
+                    latest = str(td.get("latest", "N/A")) if td.get("latest") else "EMPTY"
+                    click.echo(f"{td['table']:<25} {latest:<12}")
+            return
+
+        # Full audit mode
+        click.echo(f"Running TuShare data audit (last {years} years)...")
+        result = audit.run_audit(years=years)
+
+        click.echo(f"\nAudit Complete:")
+        click.echo(f"  Total plugins: {result.total_interfaces}")
+        click.echo(f"  Tables with data: {result.total_tables}")
+        click.echo(f"  Empty tables: {result.empty_tables}")
+        click.echo(f"  Overall completeness: {result.overall_completeness_pct:.1f}%")
+        click.echo(f"  Issues found: {len(result.issues)}")
+
+        if output_format == 'table':
+            click.echo("\nPlugin Status:")
+            click.echo(f"{'Plugin':<35} {'Table':<30} {'Rows':>10} {'Complete':>10}")
+            click.echo("-" * 90)
+
+            for table in result.tables:
+                rows = table.row_count if table.exists else "N/A"
+                comp = f"{table.completeness_pct:.1f}%" if table.exists and not table.is_empty else "N/A"
+                status = "EMPTY" if table.is_empty else "MISSING" if not table.exists else ""
+                name = table.plugin_name[:32] + ("*" if len(table.plugin_name) > 32 else "")
+                click.echo(f"{name:<35} {table.table_name:<30} {rows:>10} {comp:>10} {status}")
+
+        if output:
+            import json
+            with open(output, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'generated_at': result.generated_at.isoformat(),
+                    'total_interfaces': result.total_interfaces,
+                    'total_tables': result.total_tables,
+                    'empty_tables': result.empty_tables,
+                    'overall_completeness_pct': result.overall_completeness_pct,
+                    'issues': result.issues,
+                    'tables': [
+                        {
+                            'plugin_name': t.plugin_name,
+                            'table_name': t.table_name,
+                            'exists': t.exists,
+                            'row_count': t.row_count,
+                            'is_empty': t.is_empty,
+                            'completeness_pct': t.completeness_pct,
+                        }
+                        for t in result.tables
+                    ]
+                }, f, indent=2, ensure_ascii=False)
+            click.echo(f"\n✓ Audit results saved to: {output}")
+
+    except Exception as e:
+        click.echo(f"✗ Audit failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@tushare.command('plan')
+@click.option('--years', default=3, type=int, help='Years of recent data (default: 3)')
+@click.option('--format', 'output_format', default='table', type=click.Choice(['table', 'json']),
+              help='Output format (default: table)')
+@click.option('--output', '-o', type=str, help='Save plan to file')
+@click.option('--include-old', is_flag=True, help='Include low-priority backfills for older data')
+@click.option('--threshold', default=95.0, type=float,
+              help='Minimum completeness threshold (default: 95.0)')
+def tushare_plan(years, output_format, output, include_old, threshold):
+    """Generate data completeness and backfill plan."""
+    click.echo(f"Generating TuShare completeness plan (last {years} years)...")
+
+    try:
+        from stock_datasource.services.tushare_completeness import get_completeness_planner
+
+        planner = get_completeness_planner()
+        plan = planner.generate_plan(
+            years=years,
+            include_low_priority=include_old,
+            min_completeness_threshold=threshold,
+        )
+
+        click.echo(f"\nCompleteness Plan:")
+        click.echo(f"  Reference date: {plan.reference_date}")
+        click.echo(f"  Overall completeness: {plan.overall_completeness_pct:.1f}%")
+        click.echo(f"  Plugins needing backfill: {plan.plugins_needing_backfill}")
+        click.echo(f"  Plugins needing initial load: {plan.plugins_needing_initial_load}")
+        click.echo(f"  Total recommended actions: {len(plan.all_recommended_actions)}")
+        click.echo(f"  Estimated time: {plan.total_estimated_minutes:.1f} minutes")
+
+        if output_format == 'table':
+            by_priority = planner.get_actions_by_priority(plan)
+
+            for priority in sorted(by_priority.keys()):
+                actions = by_priority[priority]
+                click.echo(f"\nPriority {priority} ({len(actions)} actions):")
+                for action in actions:
+                    click.echo(f"  - {action.plugin_name}: {action.reason}")
+
+        if output:
+            planner.save_plan(plan, output)
+            click.echo(f"\n✓ Plan saved to: {output}")
+
+    except Exception as e:
+        click.echo(f"✗ Plan generation failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@tushare.command('sync')
+@click.option('--dry-run', is_flag=True, default=True,
+              help='Show what would be done without executing (default: True)')
+@click.option('--execute', is_flag=True, help='Actually execute the sync (must also --confirm)')
+@click.option('--confirm', is_flag=True, help='Confirm execution (required with --execute)')
+@click.option('--years', default=3, type=int, help='Years of recent data (default: 3)')
+@click.option('--plugin', '-p', multiple=True, help='Only sync specific plugin(s) (can repeat)')
+@click.option('--max-plugins', type=int, help='Maximum number of plugins to sync')
+@click.option('--only-empty', is_flag=True, help='Only load empty/missing tables')
+@click.option('--resume', type=str, help='Resume from previous run ID')
+def tushare_sync(dry_run, execute, confirm, years, plugin, max_plugins, only_empty, resume):
+    """Synchronize TuShare data (dry-run by default)."""
+    if execute and not confirm:
+        click.echo("✗ --execute requires --confirm to actually run the sync", err=True)
+        click.echo("  Use --dry-run (default) to see what would be done, or add --confirm")
+        sys.exit(1)
+
+    if execute and confirm:
+        dry_run = False
+        click.echo("⚠️  EXECUTION MODE - Will actually run plugin sync!")
+    else:
+        click.echo("DRY RUN MODE - Showing what would be done (use --execute --confirm to run)")
+
+    try:
+        from stock_datasource.services.tushare_completeness import get_completeness_planner
+        from stock_datasource.services.tushare_sync_state import get_sync_state_manager
+        from stock_datasource.core.plugin_manager import plugin_manager
+
+        state_mgr = get_sync_state_manager()
+        run = None
+        skipped_on_resume = 0
+
+        # Handle resume
+        if resume:
+            click.echo(f"\nAttempting to resume run: {resume}")
+            run = state_mgr.get_run(resume)
+            if not run:
+                click.echo(f"✗ Run {resume} not found", err=True)
+                sys.exit(1)
+            click.echo(f"✓ Resuming run started at {run.started_at}")
+            click.echo(f"  Previous progress: {run.successful} ok, {run.failed} fail, {run.skipped} skip")
+
+            # Use original run parameters
+            years = run.years
+            plugin = tuple(run.plugin_filter) if run.plugin_filter else ()
+            only_empty = run.only_empty
+            max_plugins = run.max_plugins
+
+        click.echo(f"\nGenerating sync plan (last {years} years)...")
+
+        planner = get_completeness_planner()
+        plan = planner.generate_plan(years=years)
+
+        # Filter actions
+        actions = plan.all_recommended_actions
+
+        if plugin:
+            actions = [a for a in actions if a.plugin_name in plugin]
+            click.echo(f"Filtered to {len(actions)} actions for plugins: {', '.join(plugin)}")
+
+        if only_empty:
+            # Only include initial load actions (not backfills)
+            actions = [a for a in actions if "empty" in a.reason.lower() or "missing" in a.reason.lower()]
+            click.echo(f"Filtered to {len(actions)} empty/missing table actions")
+
+        if max_plugins:
+            actions = sorted(actions, key=lambda a: a.priority)[:max_plugins]
+            click.echo(f"Limited to first {len(actions)} actions")
+
+        click.echo(f"\nSync Plan - {len(actions)} total actions:")
+        for i, action in enumerate(actions, 1):
+            click.echo(f"\n{i}. {action.plugin_name} (priority {action.priority}):")
+            click.echo(f"   Operation: {action.operation}")
+            click.echo(f"   Reason: {action.reason}")
+            if action.params:
+                click.echo(f"   Params: {action.params}")
+
+        if dry_run:
+            click.echo(f"\n✓ Dry run complete. {len(actions)} actions would be executed.")
+            click.echo("  Run with --execute --confirm to actually perform the sync.")
+            return
+
+        # Create run state if not resuming
+        if not run:
+            run = state_mgr.create_run(
+                years=years,
+                plugin_filter=list(plugin),
+                only_empty=only_empty,
+                max_plugins=max_plugins,
+            )
+
+            # Add all actions to state
+            for action in actions:
+                state_mgr.add_action(
+                    run,
+                    plugin_name=action.plugin_name,
+                    operation=action.operation,
+                    params=action.params,
+                    priority=action.priority,
+                )
+
+        click.echo(f"\n{'='*60}")
+        click.echo(f"EXECUTING {len(actions)} PLUGIN SYNC ACTIONS")
+        click.echo(f"Run ID: {run.run_id}")
+        click.echo(f"{'='*60}")
+
+        if not plugin_manager.plugins:
+            plugin_manager.discover_plugins()
+
+        success_count = run.successful
+        fail_count = run.failed
+
+        # Only run pending/failed actions (for resume)
+        pending_actions = state_mgr.get_pending_actions(run)
+        click.echo(f"\nPending actions to run: {len(pending_actions)} "
+                   f"({skipped_on_resume} already completed in previous run)")
+
+        for i, action in enumerate(pending_actions, 1):
+            click.echo(f"\n[{i}/{len(pending_actions)}] Running {action.plugin_name}...")
+            state_mgr.mark_started(run, action.plugin_name)
+
+            plugin_obj = plugin_manager.get_plugin(action.plugin_name)
+            if not plugin_obj:
+                click.echo(f"   ✗ Plugin not found")
+                state_mgr.mark_failed(run, action.plugin_name, "Plugin not found")
+                fail_count += 1
+                continue
+
+            try:
+                if action.operation == 'run_backfill':
+                    result = plugin_obj.run_backfill(**action.params)
+                else:
+                    result = plugin_obj.run(**action.params)
+
+                status = result.get('status', 'unknown')
+                records = result.get('steps', {}).get('backfill', {}).get('ok', 0)
+
+                if status == 'success':
+                    state_mgr.mark_success(run, action.plugin_name, records)
+                    success_count += 1
+                    click.echo(f"   ✓ Success ({records} records)")
+                else:
+                    error_msg = f"Status: {status}"
+                    state_mgr.mark_failed(run, action.plugin_name, error_msg)
+                    fail_count += 1
+                    click.echo(f"   ✗ {error_msg}")
+
+            except Exception as e:
+                error_msg = str(e)
+                state_mgr.mark_failed(run, action.plugin_name, error_msg)
+                fail_count += 1
+                click.echo(f"   ✗ Failed: {error_msg}")
+
+            # Show progress
+            click.echo(f"   Progress: {run.progress_pct:.1f}% "
+                      f"({run.completed_count}/{run.total_actions})")
+
+        # Mark run complete
+        final_status = "completed" if fail_count == 0 else "partial" if success_count > 0 else "failed"
+        state_mgr.complete_run(run, final_status)
+
+        click.echo(f"\n{'='*60}")
+        click.echo(f"SYNC COMPLETE: {success_count} successful, {fail_count} failed")
+        click.echo(f"Run ID: {run.run_id}")
+        if fail_count > 0:
+            click.echo(f"To resume failures: python cli.py tushare sync --execute --confirm --resume {run.run_id}")
+        click.echo(f"{'='*60}")
+
+        if fail_count > 0:
+            sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"✗ Sync failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@tushare.command('runs')
+@click.option('--limit', default=10, type=int, help='Number of runs to show (default: 10)')
+@click.option('--detail', is_flag=True, help='Show detailed action results')
+def tushare_runs(limit, detail):
+    """List recent sync runs and their status."""
+    try:
+        from stock_datasource.services.tushare_sync_state import get_sync_state_manager
+
+        state_mgr = get_sync_state_manager()
+        runs = state_mgr.list_runs(limit=limit)
+
+        if not runs:
+            click.echo("No sync runs found.")
+            return
+
+        click.echo(f"\nRecent Sync Runs (last {len(runs)}):")
+        click.echo(f"\n{'Run ID':<26} {'Started':<19} {'Status':<12} {'OK':>4} {'Fail':>5} {'Progress'}")
+        click.echo("─" * 80)
+
+        for run in runs:
+            started = run.started_at.strftime("%Y-%m-%d %H:%M:%S")
+            click.echo(
+                f"{run.run_id:<26} {started:<19} {run.status:<12} "
+                f"{run.successful:>4} {run.failed:>5} {run.progress_pct:>7.1f}%"
+            )
+
+        if detail and runs:
+            latest = runs[0]
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Latest Run Details: {latest.run_id}")
+            click.echo(f"{'='*60}")
+
+            for action in latest.actions:
+                status_mark = "✓" if action.status == "success" else "✗" if action.status == "failed" else "○"
+                click.echo(f"  {status_mark} {action.plugin_name}: {action.status}")
+                if action.error_message:
+                    click.echo(f"     Error: {action.error_message[:80]}")
+
+    except Exception as e:
+        click.echo(f"✗ Failed to list runs: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@tushare.command('probe')
+@click.option('--limit', type=int, help='Only probe N interfaces (for testing)')
+@click.option('--output', '-o', type=str, help='Save probe results to file')
+def tushare_probe(limit, output):
+    """Probe TuShare API interfaces for availability."""
+    click.echo("Probing TuShare API interfaces...")
+
+    try:
+        from stock_datasource.services.tushare_probe import get_tushare_probe
+
+        probe = get_tushare_probe()
+        report = probe.probe_all(limit=limit)
+
+        click.echo(f"\nProbe Complete:")
+        click.echo(f"  Interfaces probed: {report.total_probed}")
+        click.echo(f"  Supported with data: {report.supported_with_data}")
+        click.echo(f"  Supported (empty): {report.supported_empty}")
+        click.echo(f"  Permission denied: {report.permission_denied}")
+        click.echo(f"  Requires params: {report.requires_params}")
+        click.echo(f"  API errors: {report.api_errors}")
+        click.echo(f"  Duration: {report.duration_seconds:.1f}s")
+        click.echo(f"  Rate limit hits: {report.rate_limit_hits}")
+
+        if output:
+            probe.save_report(report, output)
+            click.echo(f"\n✓ Probe report saved to: {output}")
+
+    except Exception as e:
+        click.echo(f"✗ Probe failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+# ============================================================
 # Register CLI subcommand modules (setup, doctor, server, config)
 # ============================================================
 

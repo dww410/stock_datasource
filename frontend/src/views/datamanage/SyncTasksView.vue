@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useDataManageStore } from '@/stores/datamanage'
 import { useAuthStore } from '@/stores/auth'
@@ -7,6 +7,7 @@ import type { ScheduleExecutionRecord, BatchExecutionDetail, BatchTaskDetail } f
 import TaskDetailDialog from './components/TaskDetailDialog.vue'
 import type { SyncTask } from '@/api/datamanage'
 import { datamanageApi } from '@/api/datamanage'
+import { getTaskStatusText, getTaskStatusTheme } from './utils/taskStatus'
 
 const dataStore = useDataManageStore()
 const authStore = useAuthStore()
@@ -68,6 +69,8 @@ const batchColumns = [
 // Apply filters
 const handleFilterChange = () => {
   fetchBatchExecutions()
+  // Update polling params to match current filters
+  dataStore.startTaskPolling(3000, 30, 100, taskStatusFilter.value, triggerTypeFilter.value)
 }
 
 const handleResetFilters = () => {
@@ -274,10 +277,10 @@ const handlePartialRetryExecution = async (executionId: string, taskIds?: string
 const getErrorBrief = (errorMessage?: string) => {
   if (!errorMessage) return ''
   const stackSeparator = '\n\n--- 堆栈跟踪 ---\n'
-  let brief = errorMessage.includes(stackSeparator) 
+  let brief = errorMessage.includes(stackSeparator)
     ? errorMessage.substring(0, errorMessage.indexOf(stackSeparator))
     : errorMessage
-  const maxLen = 40
+  const maxLen = 200
   if (brief.length > maxLen) {
     brief = brief.substring(0, maxLen) + '...'
   }
@@ -285,43 +288,6 @@ const getErrorBrief = (errorMessage?: string) => {
 }
 
 // Batch task status helpers
-const getBatchStatusTheme = (status: string) => {
-  switch (status) {
-    case 'completed': return 'success'
-    case 'failed': return 'danger'
-    case 'running': return 'warning'
-    case 'stopping': return 'warning'
-    case 'stopped': return 'default'
-    case 'interrupted': return 'danger'
-    case 'skipped': return 'default'
-    default: return 'default'
-  }
-}
-
-const getBatchStatusText = (status: string) => {
-  switch (status) {
-    case 'completed': return '完成'
-    case 'failed': return '失败'
-    case 'running': return '执行中'
-    case 'stopping': return '停止中'
-    case 'stopped': return '已停止'
-    case 'interrupted': return '中断'
-    case 'skipped': return '跳过'
-    default: return status
-  }
-}
-
-const getTaskStatusText = (status: string) => {
-  switch (status) {
-    case 'completed': return '完成'
-    case 'failed': return '失败'
-    case 'running': return '执行中'
-    case 'pending': return '等待'
-    case 'cancelled': return '已取消'
-    default: return status
-  }
-}
-
 const getTriggerTypeTheme = (type: string) => {
   switch (type) {
     case 'scheduled': return 'primary'
@@ -340,17 +306,6 @@ const getTriggerTypeText = (type: string) => {
     case 'retry': return '重试'
     default: return type
   }
-}
-
-const getStatusTheme = (status: string) => {
-  const themes: Record<string, string> = {
-    pending: 'warning',
-    running: 'primary',
-    completed: 'success',
-    failed: 'danger',
-    cancelled: 'default'
-  }
-  return themes[status] || 'default'
 }
 
 const formatTime = (timeStr?: string) => {
@@ -388,6 +343,12 @@ const getTaskName = (row: ScheduleExecutionRecord | BatchExecutionDetail) => {
 
 onMounted(() => {
   fetchBatchExecutions()
+  // Start polling with current filter params
+  dataStore.startTaskPolling(3000, 30, 100, taskStatusFilter.value, triggerTypeFilter.value)
+})
+
+onUnmounted(() => {
+  dataStore.stopTaskPolling()
 })
 </script>
 
@@ -471,13 +432,13 @@ onMounted(() => {
                   { colKey: 'status', title: '状态', width: 100 },
                   { colKey: 'progress', title: '进度', width: 120 },
                   { colKey: 'records_processed', title: '处理记录', width: 120 },
-                  { colKey: 'error_brief', title: '错误信息', minWidth: 200 }
+                  { colKey: 'error_brief', title: '错误信息', minWidth: 300 }
                 ]"
                 size="small"
                 row-key="task_id"
               >
                 <template #status="{ row: task }">
-                  <t-tag :theme="getStatusTheme(task.status)" size="small">
+                  <t-tag :theme="getTaskStatusTheme(task.status)" size="small">
                     {{ getTaskStatusText(task.status) }}
                   </t-tag>
                 </template>
@@ -531,8 +492,8 @@ onMounted(() => {
           </template>
           <template #status="{ row }">
             <div class="status-cell">
-              <t-tag :theme="getBatchStatusTheme(row.status)" size="small">
-                {{ getBatchStatusText(row.status) }}
+              <t-tag :theme="getTaskStatusTheme(row.status)" size="small">
+                {{ getTaskStatusText(row.status) }}
               </t-tag>
               <span v-if="row.failed_plugins > 0" class="failed-badge">
                 {{ row.failed_plugins }} 失败
@@ -608,8 +569,8 @@ onMounted(() => {
             </div>
             <div class="summary-item">
               <span class="label">状态:</span>
-              <t-tag :theme="getBatchStatusTheme(selectedBatchDetail.status)" size="small">
-                {{ getBatchStatusText(selectedBatchDetail.status) }}
+              <t-tag :theme="getTaskStatusTheme(selectedBatchDetail.status)" size="small">
+                {{ getTaskStatusText(selectedBatchDetail.status) }}
               </t-tag>
             </div>
             <div class="summary-item">
@@ -652,14 +613,14 @@ onMounted(() => {
                 { colKey: 'status', title: '状态', width: 100 },
                 { colKey: 'progress', title: '进度', width: 120 },
                 { colKey: 'records_processed', title: '处理记录', width: 120 },
-                { colKey: 'error_brief', title: '错误信息', minWidth: 200 }
+                { colKey: 'error_brief', title: '错误信息', minWidth: 300 }
               ]"
               size="small"
               row-key="task_id"
               max-height="300"
             >
               <template #status="{ row }">
-                <t-tag :theme="getStatusTheme(row.status)" size="small">
+                <t-tag :theme="getTaskStatusTheme(row.status)" size="small">
                   {{ getTaskStatusText(row.status) }}
                 </t-tag>
               </template>
@@ -692,7 +653,7 @@ onMounted(() => {
               </template>
             </t-table>
           </div>
-          
+
           <!-- Error Summary with Copy Button -->
           <div v-if="selectedBatchDetail.error_summary" class="error-summary-section">
             <div class="error-header">
@@ -704,7 +665,12 @@ onMounted(() => {
             </div>
             <pre class="error-content">{{ selectedBatchDetail.error_summary }}</pre>
           </div>
-          
+
+          <div v-else-if="selectedBatchDetail.status === 'running'" class="running-status">
+            <t-icon name="loading" size="20px" style="color: var(--td-warning-color); margin-right: 8px" />
+            任务执行中，请稍候...
+          </div>
+
           <div v-else class="no-errors">
             <t-icon name="check-circle" size="20px" style="color: var(--td-success-color); margin-right: 8px" />
             所有任务执行成功，无错误信息

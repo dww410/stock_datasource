@@ -268,16 +268,29 @@ const availablePlugins = computed(() => {
 })
 
 const pluginColumns = [
-  { colKey: 'name', title: '插件名称', width: 180 },
-  { colKey: 'description', title: '描述', minWidth: 200, ellipsis: true },
+  { colKey: 'name', title: '插件名称', width: 220, className: 'col-name-nowrap' },
+  { colKey: 'description', title: '描述', minWidth: 240, ellipsis: true },
   { colKey: 'category', title: '类别', width: 100 },
   { colKey: 'role', title: '角色', width: 100 },
   { colKey: 'schedule_frequency', title: '调度频率', width: 100 },
   { colKey: 'latest_date', title: '最新数据', width: 120 },
+  { colKey: 'last_ingested_at', title: '最新同步', width: 200 },
   { colKey: 'missing_count', title: '缺失天数', width: 100 },
   { colKey: 'is_enabled', title: '状态', width: 80 },
   { colKey: 'operation', title: '操作', width: 200, fixed: 'right' }
 ]
+
+const formatIngestedAt = (val?: string) => {
+  if (!val) return '-'
+  try {
+    const d = new Date(val.replace(' ', 'T'))
+    if (isNaN(d.getTime())) return val
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  } catch {
+    return val
+  }
+}
 
 const getCategoryText = (category?: string) => {
   const map: Record<string, string> = {
@@ -585,6 +598,9 @@ onMounted(() => {
             row-key="name"
             hover
           >
+            <template #name="{ row }">
+              <span style="white-space: nowrap;">{{ row.name }}</span>
+            </template>
             <template #category="{ row }">
               <t-tag :theme="getCategoryTheme(row.category)" variant="light" size="small">
                 {{ getCategoryText(row.category) }}
@@ -602,6 +618,15 @@ onMounted(() => {
             </template>
             <template #latest_date="{ row }">
               {{ row.latest_date || '-' }}
+            </template>
+            <template #last_ingested_at="{ row }">
+              <t-tooltip v-if="row.last_ingested_at" :content="formatIngestedAt(row.last_ingested_at)" placement="top" :show-arrow="false">
+                <t-tag v-if="row.is_stale" theme="warning" variant="light" size="small">
+                  {{ formatIngestedAt(row.last_ingested_at) }} · 过期
+                </t-tag>
+                <span v-else style="white-space: nowrap;">{{ formatIngestedAt(row.last_ingested_at) }}</span>
+              </t-tooltip>
+              <span v-else>-</span>
             </template>
             <template #missing_count="{ row }">
               <t-tag :theme="row.missing_count > 0 ? 'danger' : 'success'">
@@ -880,6 +905,15 @@ onMounted(() => {
 <style scoped>
 .datamanage-view {
   height: 100%;
+}
+
+/* Plugin name column: keep on a single line, never wrap or clip */
+:deep(.col-name-nowrap .t-table__cell) {
+  white-space: nowrap;
+  overflow: visible;
+}
+:deep(.col-name-nowrap .t-table__cell span) {
+  white-space: nowrap;
 }
 
 .stat-value {

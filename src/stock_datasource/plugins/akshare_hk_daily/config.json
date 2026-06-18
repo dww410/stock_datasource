@@ -1,9 +1,9 @@
 {
-  "enabled": false,
+  "enabled": true,
   "rate_limit": 60,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "AKShare Hong Kong daily data from hk_daily API",
+  "description": "AKShare 港股日线行情数据（hk_daily API）",
   "schedule": {
     "frequency": "daily",
     "time": "16:00"
@@ -12,7 +12,12 @@
     "symbol": {
       "type": "string",
       "description": "Hong Kong stock symbol, e.g., 00700",
-      "required": true
+      "required": false
+    },
+    "ts_code": {
+      "type": "string",
+      "description": "Hong Kong stock code in TuShare format, e.g., 00700.HK",
+      "required": false
     },
     "start_date": {
       "type": "string",
@@ -23,6 +28,15 @@
       "type": "string",
       "description": "End date in YYYYMMDD format",
       "required": false
+    },
+    "max_stocks": {
+      "type": "integer",
+      "description": "Maximum number of HK stocks to process in batch mode",
+      "required": false
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

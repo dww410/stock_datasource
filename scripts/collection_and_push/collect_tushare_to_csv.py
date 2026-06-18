@@ -114,7 +114,7 @@ class TuShareRealtimeCollector:
             import tushare.pro.client as tushare_client
 
             if hasattr(tushare_client, "DataApi"):
-                current_url = getattr(tushare_client.DataApi, "_DataApi__http_url", None)
+                current_url = getattr(tushare_client.DataApi, "_TUSHARE_HTTP_URL", None)
                 if api_url:
                     target = api_url.strip().rstrip("/")
                     if not target.startswith("http://") and not target.startswith("https://"):

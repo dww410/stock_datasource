@@ -65,8 +65,7 @@ class RtMinExtractor:
                 time.sleep(sleep_time)
             self._last_call_time = time.time()
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    @retry(        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     def _call_api(self, ts_code: str, freq: str) -> pd.DataFrame:
         """Call TuShare rt_min API with rate limiting and retry.

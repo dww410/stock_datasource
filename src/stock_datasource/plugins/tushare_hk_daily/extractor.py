@@ -162,7 +162,9 @@ class HKDailyExtractor:
         return result
 
     @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True,
     )
     def _call_yfinance(
         self, yf_code: str, start_date: str, end_date: str

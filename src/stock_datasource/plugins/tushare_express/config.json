@@ -1,7 +1,7 @@
 {
   "name": "tushare_express",
   "version": "1.0.0",
-  "description": "Tushare 业绩快报数据插件",
+  "description": "TuShare 业绩快报数据",
   "api_name": "express",
   "rate_limit": {
     "calls_per_minute": 120,
@@ -38,5 +38,9 @@
       "description": "报告期",
       "required": false
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

@@ -98,6 +98,16 @@
           <template #actions>
             <span class="skill-count-label">已选 {{ form.skills.length + form.user_skills.length }} 个</span>
           </template>
+          <!-- Selected skills summary bar -->
+          <div v-if="form.skills.length > 0 || form.user_skills.length > 0" class="selected-skills-bar">
+            <span class="selected-skills-label">已选技能：</span>
+            <t-tag v-for="skill in form.skills" :key="skill" closable theme="primary" variant="light" @close="togglePlatformSkill(skill, false)" style="margin: 2px 4px 2px 0;">
+              {{ skill }}
+            </t-tag>
+            <t-tag v-for="skill in form.user_skills" :key="skill" closable theme="warning" variant="light" @close="toggleUserSkill(skill, false)" style="margin: 2px 4px 2px 0;">
+              {{ skill }}
+            </t-tag>
+          </div>
           <t-tabs v-model="skillTab">
             <t-tab-panel value="platform" label="平台工具">
               <t-input v-model="skillSearch" placeholder="搜索..." clearable size="small" style="margin-bottom:8px">
@@ -399,6 +409,8 @@ onMounted(async () => {
 .slider-row { display: flex; align-items: center; gap: 12px; }
 .slider-val { font-size: 13px; color: #666; min-width: 30px; }
 .skill-count-label { font-size: 12px; color: #0052d9; }
+.selected-skills-bar { padding: 6px 0 8px; border-bottom: 1px solid #e8e8e8; margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; }
+.selected-skills-label { font-size: 11px; color: #999; margin-right: 4px; white-space: nowrap; }
 .skill-list-scroll { max-height: 280px; overflow-y: auto; }
 .skill-category { margin-bottom: 8px; }
 .category-header { font-size: 12px; font-weight: 600; color: #666; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }

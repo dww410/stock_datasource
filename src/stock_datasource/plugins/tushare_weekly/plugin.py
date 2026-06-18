@@ -52,6 +52,15 @@ class WeeklyPlugin(BasePlugin):
         if not self.db:
             raise ValueError("Database connection not available")
 
+        # Deduplicate: delete existing data for the dates being loaded (idempotent)
+        try:
+            # Check for existing data - skip if exists (incremental sync mode)
+            should_load = self._deduplicate_before_load("ods_weekly", df, date_column="trade_date", skip_if_exists=True)
+            if not should_load:
+                return {"status": "success", "skipped": True, "message": "Data already exists"}
+        except Exception as e:
+            self.logger.warning(f"Deduplication failed: {e}")
+
         # Use the BasePlugin's _ensure_table_exists method
         schema = self.get_schema()
         self._ensure_table_exists(schema)

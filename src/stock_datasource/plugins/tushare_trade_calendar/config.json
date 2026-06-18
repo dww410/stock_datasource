@@ -3,7 +3,7 @@
   "rate_limit": 120,
   "timeout": 30,
   "retry_attempts": 3,
-  "description": "TuShare trade calendar data plugin",
+  "description": "TuShare 交易日历数据",
   "schedule_enabled": false,
   "schedule_note": "交易日历数据变化不频繁，建议每半年手动执行一次更新",
   "parameters_schema": {
@@ -20,5 +20,9 @@
   "schedule": {
     "frequency": "daily",
     "time": "18:00"
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

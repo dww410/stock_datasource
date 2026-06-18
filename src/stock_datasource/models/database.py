@@ -91,7 +91,13 @@ class ClickHouseHttpClient:
                 raise ValueError(f"Unbound ClickHouse parameters in HTTP query: {unreplaced}")
         
         req_params = {"database": self.database}
-        
+        # Allow large inline IN(...) lists (e.g. 3-year trading-day lookback
+        # ~750 dates × ~12 bytes ≈ 9KB, but UNION ALL of many such subqueries
+        # blows past the default 256KB max_query_size). Set generously here so
+        # callers don't have to chunk.
+        req_params["max_query_size"] = 10485760  # 10MB
+        req_params["max_ast_elements"] = 5000000
+
         if data:
             req_params["query"] = query
             resp = self._session.post(self._base_url, params=req_params, data=data, timeout=60)

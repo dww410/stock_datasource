@@ -228,6 +228,27 @@ class TaskQueue:
                 )
                 task_data["timeout_seconds"] = 3600
 
+            # Check if task is in cooling state
+            status = task_data.get("status", "pending")
+            if status == "cooling_down":
+                now = datetime.now()
+                cooling_until_str = task_data.get("cooling_until")
+                if cooling_until_str:
+                    try:
+                        cooling_until = datetime.fromisoformat(cooling_until_str)
+                        if now < cooling_until:
+                            # Still cooling - push back to queue and return None
+                            # Worker will pick it up after cooling period
+                            logger.debug(
+                                f"Task {task_id} still cooling until {cooling_until}, requeuing"
+                            )
+                            priority = int(task_data.get("priority", 1))
+                            queue_key = self.QUEUE_KEY.format(priority=priority)
+                            redis.lpush(queue_key, task_id)
+                            return None
+                    except (ValueError, TypeError):
+                        pass  # Invalid timestamp, proceed anyway
+
             # Mark as running
             redis.hset(self.TASK_KEY.format(task_id=task_id), "status", "running")
             redis.hset(
@@ -296,10 +317,22 @@ class TaskQueue:
                     "records_processed": records_processed,
                     "completed_at": now,
                     "updated_at": now,
+                    "error_message": "",  # Clear any previous error message on success
                 },
             )
             redis.srem(self.RUNNING_KEY, task_id)
             logger.info(f"Task {task_id} completed with {records_processed} records")
+
+            # Also persist completion status to ClickHouse for history and fallback
+            try:
+                task_data = self.get_task(task_id)
+                if task_data:
+                    from stock_datasource.modules.datamanage.service import sync_task_manager
+
+                    sync_task = sync_task_manager._task_data_to_sync_task(task_data)
+                    sync_task_manager._save_task_to_db(sync_task)
+            except Exception as e:
+                logger.warning(f"Failed to persist task {task_id} completion to DB: {e}")
         except Exception as e:
             logger.error(f"Failed to complete task: {e}")
 
@@ -328,6 +361,17 @@ class TaskQueue:
             )
             redis.srem(self.RUNNING_KEY, task_id)
             logger.error(f"Task {task_id} failed: {error_message[:200]}")
+
+            # Also persist failure status to ClickHouse for history and fallback
+            try:
+                task_data = self.get_task(task_id)
+                if task_data:
+                    from stock_datasource.modules.datamanage.service import sync_task_manager
+
+                    sync_task = sync_task_manager._task_data_to_sync_task(task_data)
+                    sync_task_manager._save_task_to_db(sync_task)
+            except Exception as e:
+                logger.warning(f"Failed to persist task {task_id} failure to DB: {e}")
         except Exception as e:
             logger.error(f"Failed to mark task as failed: {e}")
 
@@ -643,14 +687,10 @@ class TaskQueue:
                     continue
 
                 if status == "failed":
-                    # Only count as failed when attempts are exhausted.
-                    if attempt >= max_attempts:
-                        failed += 1
-                    else:
-                        all_done = False
+                    failed += 1
                     continue
 
-                if status in ("pending", "running"):
+                if status in ("pending", "running", "cooling_down"):
                     all_done = False
                     continue
 

@@ -26,5 +26,9 @@
   "schedule": {
     "frequency": "monthly",
     "time": "18:00"
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "tushare_forecast",
   "version": "1.0.0",
-  "description": "Tushare 业绩预告数据插件",
+  "description": "TuShare 业绩预告数据",
   "api_name": "forecast",
   "rate_limit": {
     "calls_per_minute": 120,
@@ -43,5 +43,9 @@
       "description": "预告类型（预增/预减/扭亏/首亏/续亏/续盈/略增/略减/不确定）",
       "required": false
     }
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }

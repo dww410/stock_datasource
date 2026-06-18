@@ -11,5 +11,9 @@
     "frequency": "weekly",
     "time": "18:00",
     "day_of_week": "saturday"
+  },
+  "cooling": {
+    "rate_limit_seconds": 360,
+    "ip_limit_seconds": 600
   }
 }
